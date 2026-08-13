@@ -5,9 +5,14 @@ import numpy as np
 
 from app.services.schemas import Detection
 
+# Resolved relative to this file rather than the working directory, since
+# the API is documented to run from backend/ (`uvicorn app.main:app`) while
+# models/ lives at the repo root -- a CWD-relative path would never match.
+REPO_ROOT = Path(__file__).resolve().parents[3]
+
 
 class YOLODetector:
-    def __init__(self, weights: Path = Path("models/yolo/best.pt")) -> None:
+    def __init__(self, weights: Path = REPO_ROOT / "models" / "yolo" / "best.pt") -> None:
         self.weights = weights
         self._model: Any | None = None
 

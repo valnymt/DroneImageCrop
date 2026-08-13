@@ -8,7 +8,6 @@ from app.services.schemas import AnalysisResult
 
 router = APIRouter(tags=["analysis"])
 pipeline = CropAnalysisPipeline()
-history: list[AnalysisResult] = []
 
 
 @router.post("/analyze", response_model=AnalysisResult)
@@ -25,17 +24,10 @@ async def analyze(
         tmp.write(await image.read())
         path = Path(tmp.name)
     try:
-        result = pipeline.analyze(
+        return pipeline.analyze(
             path, crop_type, field_size_hectares, average_yield_per_plant_kg
         )
-        history.insert(0, result)
-        return result
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     finally:
         path.unlink(missing_ok=True)
-
-
-@router.get("/history", response_model=list[AnalysisResult])
-def get_history() -> list[AnalysisResult]:
-    return history

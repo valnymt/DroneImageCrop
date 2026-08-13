@@ -36,8 +36,23 @@ yarn-error.log*
 
 # typescript
 next-env.d.ts
+*.tsbuildinfo
 /dist/
 /.wrangler/
 /outputs/
 /work/
 /.npm-cache/
+
+# python / backend
+backend/.venv/
+backend/**/__pycache__/
+*.pyc
+
+# training artifacts and model checkpoints (large binaries, don't commit)
+backend/training/data/
+backend/training/runs/
+backend/training/weights/
+models/**/*.pt
+models/**/*.pth
+backend/*.pt
+backend/*.pth

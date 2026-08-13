@@ -7,4 +7,6 @@ opencv-python-headless==4.11.0.86
 ultralytics==8.3.145
 torch==2.7.0
 torchvision==0.22.0
-segment-anything==1.0
+timm==0.9.16
+mobile-sam @ git+https://github.com/ChaoningZhang/MobileSAM.git@f706ad9c4eb7f219c00d9050e46328518ffb65d2
+transformers==5.15.0

@@ -17,9 +17,10 @@ class CropAnalysisPipeline:
     def analyze(self, path: Path, crop: str, area_ha: float, average_kg: float) -> AnalysisResult:
         image = self.cv.load_and_preprocess(path)
         vegetation = self.cv.vegetation_metrics(image)
-        refined_mask = self.segmenter.refine(image, vegetation.green_mask)
         detections = self.detector.detect(image)
         plant_count = len(detections)
+        # YOLO's boxes are used as SAM prompts, so detection must run first.
+        refined_mask = self.segmenter.refine(image, vegetation.green_mask, detections)
         confidence = 100 * sum(d.confidence for d in detections) / max(plant_count, 1)
         estimated = self.yield_estimator.estimate(
             plant_count, crop, average_kg, vegetation.coverage_percent, vegetation.health_score
