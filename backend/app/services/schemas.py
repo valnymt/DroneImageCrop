@@ -19,3 +19,18 @@ class AnalysisResult(BaseModel):
     estimated_yield: float = Field(ge=0)
     confidence_score: float = Field(ge=0, le=100)
     detections: list[Detection]
+
+
+class InspectResult(BaseModel):
+    """Best-effort, low-confidence suggestions for pre-filling the analyze
+    form -- never authoritative. crop_type comes from zero-shot CLIP
+    classification (see app/services/crop_classifier.py; ~69% accurate,
+    see backend/training/CLIP_CLASSIFIER_EVAL_REPORT.md for exactly where
+    it's wrong). estimated_area_hectares is null whenever the photo has no
+    altitude metadata to derive it from -- that is the common case, not an
+    error."""
+
+    crop_type: str
+    confidence: float = Field(ge=0, le=100)
+    estimated_area_hectares: float | None = Field(default=None, ge=0)
+    area_source: str
