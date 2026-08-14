@@ -17,6 +17,16 @@ type AnalysisResult = {
   detections: Detection[];
 };
 
+// Best-effort suggestions only -- see backend/app/services/schemas.py's
+// InspectResult. crop_type is zero-shot CLIP (~69% accurate); never treat
+// either field as authoritative.
+type InspectResult = {
+  crop_type: string;
+  confidence: number;
+  estimated_area_hectares: number | null;
+  area_source: string;
+};
+
 type SessionMeta = { name: string; crop: string; date: string; image?: string };
 
 type Analysis = AnalysisResult & SessionMeta & { id: number };
@@ -107,7 +117,11 @@ export default function Home() {
   const [analyzing, setAnalyzing] = useState(false);
   const [analyzeError, setAnalyzeError] = useState<string | null>(null);
   const [latest, setLatest] = useState<Analysis | null>(null);
+  const [inspecting, setInspecting] = useState(false);
+  const [cropSuggested, setCropSuggested] = useState(false);
+  const [areaSuggested, setAreaSuggested] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const inspectRequestId = useRef(0);
 
   const totals = useMemo(() => ({
     plants: records.reduce((n, r) => n + r.plant_count, 0),
@@ -136,10 +150,48 @@ export default function Home() {
     fetchHistory();
   }, []);
 
+  function applyCrop(value: string, suggested: boolean) {
+    setCrop(value);
+    setAvgYield(String(yieldDefaults[value]));
+    setCropSuggested(suggested);
+  }
+
+  function applyArea(value: string, suggested: boolean) {
+    setArea(value);
+    setAreaSuggested(suggested);
+  }
+
   function chooseFile(f?: File) {
     if (!f || !f.type.startsWith("image/")) return;
     setFile(f);
     setPreview(URL.createObjectURL(f));
+    setCropSuggested(false);
+    setAreaSuggested(false);
+    inspectImage(f);
+  }
+
+  async function inspectImage(f: File) {
+    const requestId = ++inspectRequestId.current;
+    setInspecting(true);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    try {
+      const formData = new FormData();
+      formData.append("image", f);
+      const res = await fetch(`${API_BASE}/api/inspect`, { method: "POST", body: formData, signal: controller.signal });
+      if (requestId !== inspectRequestId.current || !res.ok) return;
+      const result: InspectResult = await res.json();
+      if (requestId !== inspectRequestId.current) return;
+      if (result.crop_type in yieldDefaults) applyCrop(result.crop_type, true);
+      if (result.estimated_area_hectares != null) applyArea(String(result.estimated_area_hectares), true);
+    } catch {
+      // Best-effort only: network error, timeout/abort, or the backend
+      // being down. The form works fine with manual entry -- fail silent,
+      // no error surfaced (this call never blocks /analyze).
+    } finally {
+      clearTimeout(timeout);
+      if (requestId === inspectRequestId.current) setInspecting(false);
+    }
   }
 
   async function runAnalysis() {
@@ -215,7 +267,7 @@ export default function Home() {
         <header><div><span className="eyebrow">DRONE CROP INTELLIGENCE</span><h1>{view === "dashboard" ? "Field overview" : view === "analyze" ? "Analyze a field" : view === "results" ? "Analysis complete" : view === "history" ? "Field history" : "System settings"}</h1></div><div className="header-actions"><button className="icon-btn">?</button><button className="icon-btn">♢</button><button className="primary compact" onClick={() => setView("analyze")}>＋ New analysis</button></div></header>
 
         {view === "dashboard" && <Dashboard records={records} totals={totals} onAnalyze={() => setView("analyze")} onHistory={() => setView("history")} />}
-        {view === "analyze" && <Upload file={file} preview={preview} fieldName={fieldName} crop={crop} area={area} avgYield={avgYield} analyzing={analyzing} error={analyzeError} inputRef={inputRef} onFile={chooseFile} setFieldName={setFieldName} setCrop={(value: string) => { setCrop(value); setAvgYield(String(yieldDefaults[value])); }} setArea={setArea} setAvgYield={setAvgYield} run={runAnalysis} />}
+        {view === "analyze" && <Upload file={file} preview={preview} fieldName={fieldName} crop={crop} area={area} avgYield={avgYield} analyzing={analyzing} error={analyzeError} inspecting={inspecting} cropSuggested={cropSuggested} areaSuggested={areaSuggested} inputRef={inputRef} onFile={chooseFile} setFieldName={setFieldName} setCrop={(value: string) => applyCrop(value, false)} setArea={(value: string) => applyArea(value, false)} setAvgYield={setAvgYield} run={runAnalysis} />}
         {view === "results" && latest && <Results data={latest} onNew={() => setView("analyze")} />}
         {view === "history" && <History records={records} loading={historyLoading} error={historyError} onRetry={fetchHistory} />}
         {view === "settings" && <Settings />}
@@ -247,8 +299,8 @@ function Dashboard({ records, totals, onAnalyze, onHistory }: { records: History
 
 function Upload(p: any) {
   return <div className="page narrow"><div className="steps"><span className="done">1</span><i /><span>2</span><i /><span>3</span><small>Upload imagery</small><small>Field details</small><small>AI analysis</small></div>
-    <section className="upload-grid"><article className="panel upload-panel"><h3>Drone imagery</h3><p>Upload a high-resolution aerial image of your field.</p><div className={`dropzone ${p.preview ? "has-image" : ""}`} onClick={() => p.inputRef.current?.click()} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); p.onFile(e.dataTransfer.files[0]); }}>{p.preview ? <img src={p.preview} alt="Selected aerial field" /> : <><div className="upload-icon">↥</div><b>Drop your drone image here</b><span>or click to browse your files</span><small>JPG or PNG · Maximum 20 MB</small></>}<input ref={p.inputRef} hidden type="file" accept="image/png,image/jpeg" onChange={(e) => p.onFile(e.target.files?.[0])} /></div>{p.file && <div className="file-pill"><span>✓</span><div><b>{p.file.name}</b><small>{(p.file.size / 1048576).toFixed(2)} MB · Ready for analysis</small></div><button onClick={(e) => { e.stopPropagation(); p.inputRef.current?.click(); }}>Replace</button></div>}</article>
-    <article className="panel form-panel"><h3>Field parameters</h3><p>These details calibrate density and yield estimates.</p><label>FIELD NAME<input value={p.fieldName} onChange={(e) => p.setFieldName(e.target.value)} /></label><div className="form-row"><label>CROP TYPE<select value={p.crop} onChange={(e) => p.setCrop(e.target.value)}><option>Wheat</option><option>Corn</option><option>Rice</option><option>Soybean</option><option>Tomato</option></select></label><label>FIELD AREA<div className="input-unit"><input type="number" min=".01" step=".01" value={p.area} onChange={(e) => p.setArea(e.target.value)} /><span>ha</span></div><small className="field-help">Total ground area visible in this image. 1 hectare = 10,000 m² = 2.47 acres.</small></label></div><div className="quick-values"><span>QUICK AREA:</span>{["0.5","1","2","5"].map((value) => <button type="button" className={p.area === value ? "chosen" : ""} key={value} onClick={() => p.setArea(value)}>{value} ha</button>)}</div><label>AVERAGE YIELD PER PLANT<div className="input-unit"><input type="number" min=".001" step=".001" value={p.avgYield} onChange={(e) => p.setAvgYield(e.target.value)} /><span>kg</span></div><small className="field-help">Expected harvested weight from one plant. A typical {p.crop.toLowerCase()} starting value has been filled automatically; use your farm records when available.</small></label><div className="parameter-note"><b>Not sure about field area?</b><span>Use the mapped plot size from your drone flight plan, GPS survey, Google Earth measurement, or farm record. A normal photo cannot reveal physical area without altitude or ground-scale data.</span></div><div className="tech-note"><b>⌁ RGB health analysis</b><span>The uploaded image is measured for green vegetation coverage using three independent RGB indices (Excess Green, VARI, ExGR) that must agree before a pixel counts as vegetation. Non-green areas are treated as bare soil or stressed ground, not classified by color. Results are visual indicators—not a laboratory diagnosis.</span></div>{p.error && <div className="tech-note error-note"><b>⚠ Analysis failed</b><span>{p.error}</span></div>}<button className="primary full" disabled={!p.file || p.analyzing || Number(p.area) <= 0 || Number(p.avgYield) <= 0} onClick={p.run}>{p.analyzing ? <><span className="spinner" /> Running computer-vision pipeline…</> : <>Run image analysis <span>→</span></>}</button></article></section>
+    <section className="upload-grid"><article className="panel upload-panel"><h3>Drone imagery</h3><p>Upload a high-resolution aerial image of your field.</p><div className={`dropzone ${p.preview ? "has-image" : ""}`} onClick={() => p.inputRef.current?.click()} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); p.onFile(e.dataTransfer.files[0]); }}>{p.preview ? <img src={p.preview} alt="Selected aerial field" /> : <><div className="upload-icon">↥</div><b>Drop your drone image here</b><span>or click to browse your files</span><small>JPG or PNG · Maximum 20 MB</small></>}{p.inspecting && <span className="inspect-status"><span className="spinner" /> Checking photo details…</span>}<input ref={p.inputRef} hidden type="file" accept="image/png,image/jpeg" onChange={(e) => p.onFile(e.target.files?.[0])} /></div>{p.file && <div className="file-pill"><span>✓</span><div><b>{p.file.name}</b><small>{(p.file.size / 1048576).toFixed(2)} MB · Ready for analysis</small></div><button onClick={(e) => { e.stopPropagation(); p.inputRef.current?.click(); }}>Replace</button></div>}</article>
+    <article className="panel form-panel"><h3>Field parameters</h3><p>These details calibrate density and yield estimates.</p><label>FIELD NAME<input value={p.fieldName} onChange={(e) => p.setFieldName(e.target.value)} /></label><div className="form-row"><label>CROP TYPE<select value={p.crop} onChange={(e) => p.setCrop(e.target.value)}><option>Wheat</option><option>Corn</option><option>Rice</option><option>Soybean</option><option>Tomato</option></select>{p.cropSuggested && <small className="suggested-tag">Suggested: <b>{p.crop}</b> — confirm or change</small>}</label><label>FIELD AREA<div className="input-unit"><input type="number" min=".01" step=".01" value={p.area} onChange={(e) => p.setArea(e.target.value)} /><span>ha</span></div>{p.areaSuggested ? <small className="suggested-tag">Suggested: <b>{p.area} ha</b> — confirm or change</small> : <small className="field-help">Total ground area visible in this image. 1 hectare = 10,000 m² = 2.47 acres.</small>}</label></div><div className="quick-values"><span>QUICK AREA:</span>{["0.5","1","2","5"].map((value) => <button type="button" className={p.area === value ? "chosen" : ""} key={value} onClick={() => p.setArea(value)}>{value} ha</button>)}</div><label>AVERAGE YIELD PER PLANT<div className="input-unit"><input type="number" min=".001" step=".001" value={p.avgYield} onChange={(e) => p.setAvgYield(e.target.value)} /><span>kg</span></div><small className="field-help">Expected harvested weight from one plant. A typical {p.crop.toLowerCase()} starting value has been filled automatically; use your farm records when available.</small></label><div className="parameter-note"><b>Not sure about field area?</b><span>Use the mapped plot size from your drone flight plan, GPS survey, Google Earth measurement, or farm record. A normal photo cannot reveal physical area without altitude or ground-scale data.</span></div><div className="tech-note"><b>⌁ RGB health analysis</b><span>The uploaded image is measured for green vegetation coverage using three independent RGB indices (Excess Green, VARI, ExGR) that must agree before a pixel counts as vegetation. Non-green areas are treated as bare soil or stressed ground, not classified by color. Results are visual indicators—not a laboratory diagnosis.</span></div>{p.error && <div className="tech-note error-note"><b>⚠ Analysis failed</b><span>{p.error}</span></div>}<button className="primary full" disabled={!p.file || p.analyzing || Number(p.area) <= 0 || Number(p.avgYield) <= 0} onClick={p.run}>{p.analyzing ? <><span className="spinner" /> Running computer-vision pipeline…</> : <>Run image analysis <span>→</span></>}</button></article></section>
   </div>;
 }
 
