@@ -295,6 +295,90 @@ def test_recompute_rejects_zero_area():
     assert response.status_code == 422
 
 
+# /compare (flight-to-flight diff, Phase Q) -- FlightComparator is mocked
+# below for the same reason as /recompute: these exercise the API
+# contract, not the ORB/homography math (see test_flight_comparator.py for
+# that).
+
+
+def test_compare_rejects_unsupported_content_type():
+    response = client.post(
+        "/api/compare",
+        files={
+            "image_before": ("a.txt", b"not an image", "text/plain"),
+            "image_after": ("b.jpg", real_jpeg_bytes(), "image/jpeg"),
+        },
+    )
+    assert response.status_code == 415
+
+
+@patch("app.api.analysis.comparator")
+def test_compare_returns_alignment_result(mock_comparator):
+    import numpy as np
+
+    from app.services.flight_comparator import ComparisonResult
+
+    mock_comparator.compare.return_value = ComparisonResult(
+        alignment_ok=True, keypoints_matched=87, inlier_ratio=91.2,
+        growth_percent=4.5, loss_percent=1.2, unchanged_percent=94.3,
+        diff_overlay=np.zeros((10, 10, 3), dtype=np.uint8), warning=None,
+    )
+
+    response = client.post(
+        "/api/compare",
+        files={
+            "image_before": ("before.jpg", real_jpeg_bytes(), "image/jpeg"),
+            "image_after": ("after.jpg", real_jpeg_bytes(), "image/jpeg"),
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["alignment_ok"] is True
+    assert body["keypoints_matched"] == 87
+    assert body["growth_percent"] == 4.5
+    assert body["diff_overlay"].startswith("data:image/png;base64,")
+    assert body["warning"] is None
+
+
+@patch("app.api.analysis.comparator")
+def test_compare_surfaces_alignment_failure_without_erroring(mock_comparator):
+    import numpy as np
+
+    from app.services.flight_comparator import ComparisonResult
+
+    mock_comparator.compare.return_value = ComparisonResult(
+        alignment_ok=False, keypoints_matched=0, inlier_ratio=0.0,
+        growth_percent=0.0, loss_percent=0.0, unchanged_percent=0.0,
+        diff_overlay=np.zeros((1, 1, 3), dtype=np.uint8),
+        warning="Only 3 reliable matching features found between the two photos (need at least 12).",
+    )
+
+    response = client.post(
+        "/api/compare",
+        files={
+            "image_before": ("before.jpg", real_jpeg_bytes(), "image/jpeg"),
+            "image_after": ("after.jpg", real_jpeg_bytes(), "image/jpeg"),
+        },
+    )
+
+    assert response.status_code == 200  # a failed alignment is a valid, honest response -- not a server error
+    body = response.json()
+    assert body["alignment_ok"] is False
+    assert "reliable matching features" in body["warning"]
+
+
+def test_compare_rejects_undecodable_image():
+    response = client.post(
+        "/api/compare",
+        files={
+            "image_before": ("before.jpg", b"not-a-real-jpeg", "image/jpeg"),
+            "image_after": ("after.jpg", real_jpeg_bytes(), "image/jpeg"),
+        },
+    )
+    assert response.status_code == 422
+
+
 # /report (PDF export) -- generate_report_pdf is mocked below for the same
 # reason: these exercise the API contract, not PDF rendering (see
 # test_report_generator.py for that).

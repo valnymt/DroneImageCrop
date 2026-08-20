@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
-type View = "dashboard" | "analyze" | "results" | "history" | "settings";
+type View = "dashboard" | "analyze" | "results" | "history" | "compare" | "settings";
 
 type Settings = {
   areaUnit: "ha" | "acres";
@@ -230,6 +230,7 @@ const nav = [
   ["dashboard", "⌂", "Overview"],
   ["analyze", "⌁", "New analysis"],
   ["history", "▤", "Field history"],
+  ["compare", "⇄", "Compare flights"],
   ["settings", "⚙", "Settings"],
 ] as const;
 
@@ -443,12 +444,13 @@ export default function Home() {
       </aside>
 
       <section className="content">
-        <header><div><span className="eyebrow">DRONE CROP INTELLIGENCE</span><h1>{view === "dashboard" ? "Field overview" : view === "analyze" ? "Analyze a field" : view === "results" ? "Analysis complete" : view === "history" ? "Field history" : "System settings"}</h1></div><div className="header-actions"><button className="icon-btn">?</button><button className="icon-btn">♢</button><button className="primary compact" onClick={() => setView("analyze")}>＋ New analysis</button></div></header>
+        <header><div><span className="eyebrow">DRONE CROP INTELLIGENCE</span><h1>{view === "dashboard" ? "Field overview" : view === "analyze" ? "Analyze a field" : view === "results" ? "Analysis complete" : view === "history" ? "Field history" : view === "compare" ? "Compare flights" : "System settings"}</h1></div><div className="header-actions"><button className="icon-btn">?</button><button className="icon-btn">♢</button><button className="primary compact" onClick={() => setView("analyze")}>＋ New analysis</button></div></header>
 
         {view === "dashboard" && <Dashboard records={records} totals={totals} onAnalyze={() => setView("analyze")} onHistory={() => setView("history")} />}
         {view === "analyze" && <Upload file={file} preview={preview} fieldName={fieldName} crop={crop} area={area} analyzing={analyzing} error={analyzeError} inspecting={inspecting} cropSuggested={cropSuggested} areaSuggested={areaSuggested} areaSource={areaSource} manualAltitude={manualAltitude} setManualAltitude={setManualAltitude} onEstimateAltitude={estimateWithManualAltitude} areaUnit={settings.areaUnit} inputRef={inputRef} onFile={chooseFile} setFieldName={setFieldName} run={runAnalysis} />}
         {view === "results" && latest && <Results data={latest} file={file} areaUnit={settings.areaUnit} onNew={() => setView("analyze")} onAdjust={(patch) => setLatest((prev) => prev ? { ...prev, ...patch } : prev)} />}
         {view === "history" && <History records={records} loading={historyLoading} error={historyError} onRetry={fetchHistory} areaUnit={settings.areaUnit} />}
+        {view === "compare" && <Compare />}
         {view === "settings" && <Settings settings={settings} onSave={saveSettings} />}
       </section>
     </main>
@@ -756,6 +758,94 @@ function History({ records, loading, error, onRetry, areaUnit }: { records: Hist
     {!loading && records.length > 0 && filtered.length === 0 && <div className="tr"><span>No analyses match your search or filter.</span></div>}
     {!loading && filtered.map((r, i) => <div className="tr" key={r.id}><span className="field-cell"><i className={`thumb t${i % 3 + 1}`} /><span><b>{r.name}</b><small>{r.crop}</small></span></span><span>{r.date}</span><span>{r.plant_count.toLocaleString()}</span><span>{toDisplayDensity(r.crop_density)}</span><span><em className="health-pill">● {Math.round(r.health_score)}</em></span><span><b>{r.estimated_yield.toLocaleString()} kg</b></span></div>)}</div>}
   </section></div>;
+}
+
+type ComparisonResult = {
+  alignment_ok: boolean;
+  keypoints_matched: number;
+  inlier_ratio: number;
+  growth_percent: number;
+  loss_percent: number;
+  unchanged_percent: number;
+  diff_overlay: string;
+  warning: string | null;
+};
+
+function CompareDropzone({ label, hint, preview, onFile }: { label: string; hint: string; preview: string; onFile: (f?: File) => void }) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  return <article className="panel upload-panel compare-slot"><h3>{label}</h3><p>{hint}</p>
+    <div className={`dropzone ${preview ? "has-image" : ""}`} onClick={() => inputRef.current?.click()} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); onFile(e.dataTransfer.files[0]); }}>
+      {preview ? <img src={preview} alt={`${label} field photo`} /> : <><div className="upload-icon">↥</div><b>Drop photo here</b><span>or click to browse</span></>}
+      <input ref={inputRef} hidden type="file" accept="image/png,image/jpeg" onChange={(e) => onFile(e.target.files?.[0])} />
+    </div>
+  </article>;
+}
+
+function Compare() {
+  const [before, setBefore] = useState<File | null>(null);
+  const [beforePreview, setBeforePreview] = useState("");
+  const [after, setAfter] = useState<File | null>(null);
+  const [afterPreview, setAfterPreview] = useState("");
+  const [comparing, setComparing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<ComparisonResult | null>(null);
+
+  function chooseBefore(f?: File) {
+    if (!f || !f.type.startsWith("image/")) return;
+    setBefore(f);
+    setBeforePreview(URL.createObjectURL(f));
+    setResult(null);
+  }
+  function chooseAfter(f?: File) {
+    if (!f || !f.type.startsWith("image/")) return;
+    setAfter(f);
+    setAfterPreview(URL.createObjectURL(f));
+    setResult(null);
+  }
+
+  async function runCompare() {
+    if (!before || !after) return;
+    setComparing(true);
+    setError(null);
+    setResult(null);
+    try {
+      const formData = new FormData();
+      formData.append("image_before", before);
+      formData.append("image_after", after);
+      const res = await fetch(`${API_BASE}/api/compare`, { method: "POST", body: formData });
+      if (!res.ok) throw new Error(await parseError(res, `Comparison failed (${res.status}).`));
+      setResult(await res.json());
+    } catch (err) {
+      setError(err instanceof TypeError ? NETWORK_ERROR : err instanceof Error ? err.message : "Comparison failed.");
+    } finally {
+      setComparing(false);
+    }
+  }
+
+  return <div className="page narrow">
+    <section className="upload-grid compare-grid">
+      <CompareDropzone label="Before" hint="An earlier flight over the same field." preview={beforePreview} onFile={chooseBefore} />
+      <CompareDropzone label="After" hint="A more recent flight over the same field." preview={afterPreview} onFile={chooseAfter} />
+    </section>
+    <div className="tech-note"><b>⇄ How this works</b><span>ORB feature matching finds points the two photos share, then a homography aligns the "before" photo onto the "after" photo's frame -- correcting for the drone not flying the exact same path twice. The aligned vegetation masks are then diffed directly: green marks new growth, red marks vegetation lost between the two flights.</span></div>
+    {error && <div className="tech-note error-note"><b>⚠ Comparison failed</b><span>{error}</span></div>}
+    <button className="primary full" disabled={!before || !after || comparing} onClick={runCompare}>{comparing ? <><span className="spinner" /> Aligning photos and diffing vegetation…</> : <>Compare flights <span>→</span></>}</button>
+
+    {result && !result.alignment_ok && <div className="tech-note error-note" style={{marginTop: 18}}><b>⚠ Couldn't align these photos</b><span>{result.warning ?? "The two photos could not be confidently aligned."} Try two photos that clearly show the same field from a similar angle.</span></div>}
+
+    {result && result.alignment_ok && <section className="compare-results">
+      <article className="panel vision-panel"><div className="panel-head"><div><h3>Change since last flight</h3><p>{result.keypoints_matched} matched features · {result.inlier_ratio.toFixed(0)}% alignment confidence</p></div></div>
+        <div className="result-image"><img src={result.diff_overlay} alt="Vegetation change diff overlay" /><div className="model-badge">◈ CHANGE OVERLAY</div></div>
+        <div className="compare-legend"><span><i className="legend-dot grow" /> New growth</span><span><i className="legend-dot lose" /> Vegetation lost</span><span><i className="legend-dot dim" /> Outside overlap (not compared)</span></div>
+      </article>
+      <article className="panel insights"><h3>Change summary</h3><p>Measured within the region visible in both photos after alignment.</p><hr />
+        <div className="insight-row"><span>NEW GROWTH</span><b>{result.growth_percent.toFixed(1)}%</b></div><div className="bar"><i style={{width: `${result.growth_percent}%`, background: "#2f704c"}} /></div>
+        <div className="insight-row"><span>VEGETATION LOST</span><b>{result.loss_percent.toFixed(1)}%</b></div><div className="bar"><i style={{width: `${result.loss_percent}%`, background: "#b64c3c"}} /></div>
+        <div className="insight-row"><span>UNCHANGED</span><b>{result.unchanged_percent.toFixed(1)}%</b></div><div className="bar"><i style={{width: `${result.unchanged_percent}%`}} /></div>
+        <div className="method-warning"><b>Alignment method</b><span>ORB keypoints + RANSAC homography. {result.keypoints_matched} inlier matches at {result.inlier_ratio.toFixed(0)}% agreement -- higher agreement means the alignment (and therefore the diff) is more trustworthy.</span></div>
+      </article>
+    </section>}
+  </div>;
 }
 
 function Settings({ settings, onSave }: { settings: Settings; onSave: (next: Settings) => void }) {

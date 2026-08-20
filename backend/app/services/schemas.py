@@ -58,6 +58,25 @@ class RecomputeResult(BaseModel):
     average_yield_per_plant_kg: float = Field(ge=0)
 
 
+class ComparisonResult(BaseModel):
+    """Response for POST /api/compare -- ORB feature matching + homography
+    to align two photos of the same field taken at different times, then a
+    vegetation-mask diff between them (see
+    app/services/flight_comparator.py). alignment_ok is False whenever the
+    two photos couldn't be confidently aligned (e.g. not the same field,
+    too little overlap, too few distinguishing features) -- growth/loss
+    percentages are 0 in that case, not a guess."""
+
+    alignment_ok: bool
+    keypoints_matched: int = Field(ge=0)
+    inlier_ratio: float = Field(ge=0, le=100)
+    growth_percent: float = Field(ge=0, le=100)
+    loss_percent: float = Field(ge=0, le=100)
+    unchanged_percent: float
+    diff_overlay: str  # data: URL (base64 PNG)
+    warning: str | None = None
+
+
 class InspectResult(BaseModel):
     """Best-effort, low-confidence suggestions for pre-filling the analyze
     form -- never authoritative. crop_type comes from zero-shot CLIP

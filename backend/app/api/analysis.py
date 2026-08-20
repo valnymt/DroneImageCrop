@@ -9,13 +9,16 @@ from pydantic import ValidationError
 
 from app.services.crop_classifier import CropClassifier
 from app.services.field_area_estimator import estimate_area_hectares
+from app.services.flight_comparator import FlightComparator
+from app.services.image_encoding import encode_png_data_url
 from app.services.pipeline import CropAnalysisPipeline
 from app.services.report_generator import generate_report_pdf
-from app.services.schemas import AnalysisResult, InspectResult, RecomputeResult
+from app.services.schemas import AnalysisResult, ComparisonResult, InspectResult, RecomputeResult
 
 router = APIRouter(tags=["analysis"])
 pipeline = CropAnalysisPipeline()
 classifier = CropClassifier()
+comparator = FlightComparator()
 
 
 def _safe_pdf_filename(field_name: str, analysis_date: str) -> str:
@@ -115,6 +118,41 @@ async def recompute(
         crop_density=round(plant_count / field_size_hectares, 2),
         estimated_yield=estimated_yield,
         average_yield_per_plant_kg=round(per_plant_kg, 3),
+    )
+
+
+@router.post("/compare", response_model=ComparisonResult)
+async def compare(
+    image_before: UploadFile = File(...),
+    image_after: UploadFile = File(...),
+) -> ComparisonResult:
+    """Aligns two photos of the same field (ORB feature matching +
+    homography, see FlightComparator) and diffs their vegetation masks to
+    show what actually changed between flights -- new growth vs. new bare
+    patches. No image storage or history lookup involved: both photos are
+    supplied directly in the request.
+    """
+    for image in (image_before, image_after):
+        if image.content_type not in {"image/jpeg", "image/png"}:
+            raise HTTPException(415, "Only JPG and PNG images are supported.")
+
+    before_bytes = await image_before.read()
+    after_bytes = await image_after.read()
+    before_np = cv2.imdecode(np.frombuffer(before_bytes, np.uint8), cv2.IMREAD_COLOR)
+    after_np = cv2.imdecode(np.frombuffer(after_bytes, np.uint8), cv2.IMREAD_COLOR)
+    if before_np is None or after_np is None:
+        raise HTTPException(422, "One or both uploaded images could not be decoded.")
+
+    result = comparator.compare(before_np, after_np)
+    return ComparisonResult(
+        alignment_ok=result.alignment_ok,
+        keypoints_matched=result.keypoints_matched,
+        inlier_ratio=result.inlier_ratio,
+        growth_percent=result.growth_percent,
+        loss_percent=result.loss_percent,
+        unchanged_percent=result.unchanged_percent,
+        diff_overlay=encode_png_data_url(result.diff_overlay),
+        warning=result.warning,
     )
 
 

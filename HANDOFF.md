@@ -7,8 +7,8 @@ Repo: `https://github.com/valnymt/DroneImageCrop.git` (remote `origin`, on branc
 ## Current state
 
 Working tree is clean. Everything through Phase N was pushed to `origin/main`. Phase O
-(documentation-only, no code) and Phase P (texture analysis) are committed locally, not yet
-pushed — push when the user asks for it.
+(documentation-only, no code), Phase P (texture analysis), and Phase Q (flight comparison) are
+committed locally, not yet pushed — push when the user asks for it.
 
 ## How to run it
 
@@ -192,6 +192,45 @@ Also deleted `models/yolo/classifier.pt` (was never git-tracked, never loaded by
 code — a leftover from the Phase A negative-result experiment; see `CLASSIFIER_EVAL_REPORT.md`
 for why it was abandoned in favor of CLIP). Nothing wires it up; don't reintroduce it.
 
+## Phase Q — flight-to-flight change detection (ORB + homography)
+
+New standalone "Compare flights" view (its own nav item, not folded into History or Analyze).
+`backend/app/services/flight_comparator.py`: ORB keypoint detection + Lowe's-ratio-filtered
+BFMatcher + RANSAC homography aligns two photos of the same field taken at different times
+(different camera angle/position tolerated — verified through an 8° rotation + 5% scale +
+translation in tests), then diffs their vegetation masks directly: green overlay = new growth,
+red = vegetation lost, dimmed = outside the overlap region (never actually compared, so not
+shown as analyzed).
+
+**Chose ORB over SIFT**: patent history aside (SIFT's has since expired), ORB is faster on CPU
+and its rotation-invariant binary descriptors are already a comfortable match for two aerial
+photos of the same field that share scale/orientation closely — no accuracy need here justifies
+SIFT's extra cost.
+
+**No image storage needed or added**: `db/schema.ts`'s `imagePath` column only ever stored a
+filename string, never image bytes (confirmed before starting this) — so "compare against a
+history entry" isn't actually wireable without a real storage layer (R2, out of scope). Scoped
+instead as a direct two-photo upload tool, which needs nothing new on the persistence side.
+
+**Alignment failure is a first-class, honest outcome, not an error to hide**: too few
+distinguishing features, or good matches that don't agree on one consistent transform (low
+RANSAC inlier ratio) both return `alignment_ok: false` with a specific reason — no diff is
+shown, matching the project's existing "never fabricate a number" pattern (`field_area_estimator`'s "unavailable", `crop_classifier`'s confidence score). Verified this doesn't
+just silently succeed on two genuinely unrelated real photos (5 matched features, correctly
+rejected) and on two random-noise images (2 matched features, correctly rejected).
+
+Small-patch filtering: connected-component filtering drops changed regions under ~0.15% of the
+frame — otherwise single misaligned pixels at the warp's edge would read as "detected changes."
+Caught and fixed a test case during verification where an intentionally-injected bare patch
+was *correctly* filtered out for being just under that floor, then confirmed real detection
+works once the patch is a realistic size (1.56% loss detected end-to-end through the actual
+`/api/compare` HTTP layer, then again live in the browser with the diff overlay image rendering
+at full resolution and stats matching the backend exactly).
+
+9 new `FlightComparator` tests, 4 new `/api/compare` contract tests — 123 backend tests passing
+total. `POST /api/compare` takes two images directly (`image_before`, `image_after`), no
+history/database involved at all.
+
 ## Key files
 
 | File | Purpose |
@@ -202,6 +241,7 @@ for why it was abandoned in favor of CLIP). Nothing wires it up; don't reintrodu
 | `backend/app/services/yolo_detector.py` | Detection + tiling logic |
 | `backend/app/services/opencv_processor.py` | Vegetation indices, heatmap, preprocessing |
 | `backend/app/services/texture_analyzer.py` | GLCM/Haralick texture uniformity (Phase P) |
+| `backend/app/services/flight_comparator.py` | ORB + homography flight-to-flight diff (Phase Q) |
 | `backend/app/services/sam_segmenter.py` | Box-prompted SAM refinement |
 | `backend/app/services/report_generator.py` | PDF export |
 | `backend/app/api/analysis.py` | All three HTTP endpoints |
