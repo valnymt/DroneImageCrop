@@ -27,6 +27,16 @@ class PlantSizeStats(BaseModel):
 
 class AnalysisResult(BaseModel):
     plant_count: int = Field(ge=0)
+    # "fine_tuned" (normal case) or "general_fallback" -- the fine-tuned
+    # YOLO checkpoint found literally nothing despite real vegetation
+    # coverage (see open_vocab_detector.py's docstring for why: it
+    # generalizes poorly outside its ~823-image training set), so a
+    # zero-shot open-vocabulary detector ran instead. Less precise than
+    # the fine-tuned model in-distribution, but real detections instead
+    # of a guaranteed zero on an unfamiliar photo. detection_note always
+    # explains what happened either way.
+    detection_method: str
+    detection_note: str
     crop_density: float = Field(ge=0)
     crop_coverage: float = Field(ge=0, le=100)
     vegetation_score: float = Field(ge=0, le=100)

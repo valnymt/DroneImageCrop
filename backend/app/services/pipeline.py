@@ -5,6 +5,7 @@ import cv2
 import numpy as np
 
 from app.services.image_encoding import encode_png_data_url
+from app.services.open_vocab_detector import OpenVocabDetector
 from app.services.opencv_processor import OpenCVProcessor
 from app.services.plant_size_analyzer import PlantSizeAnalyzer
 from app.services.sam_segmenter import SAMSegmenter
@@ -19,6 +20,15 @@ from app.services.yolo_detector import CONF_THRESHOLD, YOLODetector
 # photos, so the segmented region actually stands out.
 SEGMENTATION_TINT_BGR = (230, 40, 220)
 SEGMENTATION_TINT_ALPHA = 0.5
+
+# Empirically confirmed (see HANDOFF.md's Phase O): the fine-tuned YOLO
+# checkpoint returns zero detections -- not borderline misses, genuinely
+# nothing -- on photos stylistically unlike its ~823-image training set,
+# even when real vegetation is clearly visible. Below this coverage,
+# "zero detections" is far more likely a genuinely bare-soil photo than a
+# domain-mismatch failure, so the (much slower) fallback only runs when
+# there's real vegetation the primary detector plausibly missed.
+FALLBACK_COVERAGE_THRESHOLD = 8.0
 
 
 def _segmentation_overlay(image: np.ndarray, mask: np.ndarray) -> np.ndarray:
@@ -36,6 +46,7 @@ class CropAnalysisPipeline:
     def __init__(self) -> None:
         self.cv = OpenCVProcessor()
         self.detector = YOLODetector()
+        self.fallback_detector = OpenVocabDetector()
         self.segmenter = SAMSegmenter()
         self.texture = TextureAnalyzer()
         self.tilt = TiltCorrector()
@@ -63,6 +74,24 @@ class CropAnalysisPipeline:
             image = tilt.image
         vegetation = self.cv.vegetation_metrics(image)
         detections = self.detector.detect(image, conf_threshold=conf_threshold)
+        detection_method = "fine_tuned"
+        detection_note = f"{len(detections)} plant(s) detected by the fine-tuned model."
+        if not detections and vegetation.coverage_percent >= FALLBACK_COVERAGE_THRESHOLD:
+            fallback_detections = self.fallback_detector.detect(image)
+            if fallback_detections:
+                detections = fallback_detections
+                detection_method = "general_fallback"
+                detection_note = (
+                    f"The fine-tuned model found nothing despite {vegetation.coverage_percent:.0f}% visible "
+                    "vegetation coverage (this photo may look unlike its training images) -- fell back to a "
+                    f"general-purpose zero-shot detector, which found {len(detections)} plant(s). Less precise "
+                    "than the fine-tuned model on photos it was actually trained for."
+                )
+            else:
+                detection_note = (
+                    f"No plants detected by either the fine-tuned model or the general-purpose fallback, "
+                    f"despite {vegetation.coverage_percent:.0f}% visible vegetation coverage."
+                )
         plant_count = len(detections)
         # YOLO's boxes are used as SAM prompts, so detection must run first.
         # segment_instances is called once here (not SAMSegmenter.refine,
@@ -102,6 +131,8 @@ class CropAnalysisPipeline:
             health_score=health,
             texture_uniformity_score=texture.uniformity_score,
             texture_pattern=texture.pattern,
+            detection_method=detection_method,
+            detection_note=detection_note,
             tilt_corrected=bool(tilt is not None and tilt.corrected),
             tilt_correction_note=tilt.note if tilt is not None else "Perspective correction disabled for this analysis.",
             # Only set when tilt correction actually changed the image's

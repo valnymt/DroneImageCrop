@@ -5,6 +5,7 @@ import cv2
 import numpy as np
 
 from app.services.pipeline import CropAnalysisPipeline, _segmentation_overlay
+from app.services.schemas import Detection
 
 
 class TestSegmentationOverlay:
@@ -41,6 +42,14 @@ def _mocked_pipeline() -> CropAnalysisPipeline:
     )
     pipeline.detector = MagicMock()
     pipeline.detector.detect.return_value = []
+    # Default coverage_percent (10.0, above FALLBACK_COVERAGE_THRESHOLD)
+    # combined with an empty detector.detect() would otherwise trigger the
+    # real (slow, network-loading) OpenVocabDetector on every test that
+    # uses this fixture -- mocked here to also find nothing, keeping the
+    # old "zero detections" behavior deterministic; TestFallbackDetection
+    # below overrides this to exercise the real trigger logic.
+    pipeline.fallback_detector = MagicMock()
+    pipeline.fallback_detector.detect.return_value = []
     pipeline.segmenter = MagicMock()
     # Real SAMSegmenter.union_masks/refine semantics: [] of instance masks
     # unions to an all-empty coverage mask, same as the old default mock.
@@ -222,3 +231,80 @@ class TestPlantSizeStatsWiring:
         assert result.plant_size_stats is not None
         assert result.plant_size_stats.plant_count == 2
         assert result.plant_size_stats.mean_area_cm2 > 0
+
+
+def _fake_detection() -> Detection:
+    return Detection(x1=1.0, y1=1.0, x2=10.0, y2=10.0, confidence=0.2, label="plant (general detector)")
+
+
+class TestFallbackDetection:
+    def test_fallback_triggers_when_fine_tuned_finds_nothing_and_coverage_is_real(self, tmp_path):
+        pipeline = _mocked_pipeline()  # default coverage_percent=10.0, detector.detect returns []
+        pipeline.fallback_detector.detect.return_value = [_fake_detection(), _fake_detection()]
+        path = tmp_path / "img.jpg"
+        cv2.imwrite(str(path), np.zeros((50, 50, 3), dtype=np.uint8))
+
+        result = pipeline.analyze(path, "Wheat", 2.0)
+
+        pipeline.fallback_detector.detect.assert_called_once()
+        assert result.detection_method == "general_fallback"
+        assert result.plant_count == 2
+        assert "fine-tuned model found nothing" in result.detection_note
+
+    def test_fallback_does_not_trigger_when_fine_tuned_finds_plants(self, tmp_path):
+        pipeline = _mocked_pipeline()
+        pipeline.detector.detect.return_value = [_fake_detection()]
+        path = tmp_path / "img.jpg"
+        cv2.imwrite(str(path), np.zeros((50, 50, 3), dtype=np.uint8))
+
+        result = pipeline.analyze(path, "Wheat", 2.0)
+
+        pipeline.fallback_detector.detect.assert_not_called()
+        assert result.detection_method == "fine_tuned"
+
+    def test_fallback_does_not_trigger_below_coverage_threshold(self, tmp_path):
+        # Zero detections on a photo with barely any vegetation at all is
+        # far more likely genuinely correct (bare soil) than a
+        # domain-mismatch failure -- must not pay for the slow fallback
+        # (or claim one ran) on every ordinary "no crop here" photo.
+        pipeline = _mocked_pipeline()
+        pipeline.cv.vegetation_metrics.return_value = SimpleNamespace(
+            green_mask=np.zeros((50, 50), dtype=np.uint8),
+            coverage_percent=2.0, vegetation_score=5.0, health_score=10.0,
+            heatmap=np.zeros((50, 50, 3), dtype=np.uint8),
+        )
+        path = tmp_path / "img.jpg"
+        cv2.imwrite(str(path), np.zeros((50, 50, 3), dtype=np.uint8))
+
+        result = pipeline.analyze(path, "Wheat", 2.0)
+
+        pipeline.fallback_detector.detect.assert_not_called()
+        assert result.detection_method == "fine_tuned"
+        assert result.plant_count == 0
+
+    def test_detection_note_when_both_detectors_find_nothing(self, tmp_path):
+        pipeline = _mocked_pipeline()  # fallback_detector.detect already mocked to return []
+        path = tmp_path / "img.jpg"
+        cv2.imwrite(str(path), np.zeros((50, 50, 3), dtype=np.uint8))
+
+        result = pipeline.analyze(path, "Wheat", 2.0)
+
+        pipeline.fallback_detector.detect.assert_called_once()
+        assert result.detection_method == "fine_tuned"  # nothing to fall back TO
+        assert result.plant_count == 0
+        assert "No plants detected by either" in result.detection_note
+
+    def test_fallback_boxes_are_used_as_sam_prompts_too(self, tmp_path):
+        # The fallback's boxes should flow through exactly like the
+        # fine-tuned model's would -- SAM refinement, plant_count, density
+        # -- not a special second-class path.
+        pipeline = _mocked_pipeline()
+        pipeline.fallback_detector.detect.return_value = [_fake_detection()]
+        path = tmp_path / "img.jpg"
+        cv2.imwrite(str(path), np.zeros((50, 50, 3), dtype=np.uint8))
+
+        pipeline.analyze(path, "Wheat", 2.0)
+
+        passed_detections = pipeline.segmenter.segment_instances.call_args[0][1]
+        assert len(passed_detections) == 1
+        assert passed_detections[0].label == "plant (general detector)"

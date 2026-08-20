@@ -17,6 +17,8 @@ def real_jpeg_bytes(size=(32, 32)) -> bytes:
 
 FAKE_RESULT = AnalysisResult(
     plant_count=42,
+    detection_method="fine_tuned",
+    detection_note="42 plant(s) detected by the fine-tuned model.",
     crop_density=21.0,
     crop_coverage=55.5,
     vegetation_score=60.0,

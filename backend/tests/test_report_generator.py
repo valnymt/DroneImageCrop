@@ -8,6 +8,8 @@ from app.services.schemas import AnalysisResult, Detection, PlantSizeStats
 def make_result(**overrides) -> AnalysisResult:
     base = dict(
         plant_count=12,
+        detection_method="fine_tuned",
+        detection_note="12 plant(s) detected by the fine-tuned model.",
         crop_density=6.0,
         crop_coverage=54.2,
         vegetation_score=61.0,

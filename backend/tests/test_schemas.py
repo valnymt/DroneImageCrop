@@ -7,6 +7,8 @@ from app.services.schemas import AnalysisResult, Detection
 def make_result(**overrides):
     base = dict(
         plant_count=10,
+        detection_method="fine_tuned",
+        detection_note="10 plant(s) detected by the fine-tuned model.",
         crop_density=5.0,
         crop_coverage=50.0,
         vegetation_score=60.0,
