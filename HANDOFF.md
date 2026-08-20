@@ -7,8 +7,9 @@ Repo: `https://github.com/valnymt/DroneImageCrop.git` (remote `origin`, on branc
 ## Current state
 
 Working tree is clean. Everything through Phase N was pushed to `origin/main`. Phase O
-(documentation-only, no code), Phase P (texture analysis), and Phase Q (flight comparison) are
-committed locally, not yet pushed — push when the user asks for it.
+(documentation-only, no code), Phase P (texture analysis), Phase Q (flight comparison), and
+Phase R (perspective/tilt correction) are committed locally, not yet pushed — push when the
+user asks for it.
 
 ## How to run it
 
@@ -231,6 +232,52 @@ at full resolution and stats matching the backend exactly).
 total. `POST /api/compare` takes two images directly (`image_before`, `image_after`), no
 history/database involved at all.
 
+## Phase R — perspective/tilt correction for non-nadir photos
+
+New `backend/app/services/tilt_corrector.py`, run as the **first** pipeline step (before
+vegetation/detection/everything -- density and coverage are measured on whatever geometry the
+image ends up with). New Settings toggle "Perspective correction" (default on), matching the
+existing enhancement/segmentation-refinement toggle pattern.
+
+**Real single-view photogrammetry, not a fake homography**: detects two line families (crop
+rows + cross-furrows) via Hough transform on the vegetation mask (not raw grayscale -- soil and
+canopy are frequently near-isoluminant, which starves plain grayscale Canny of anything to
+find; caught this as a real bug during verification, not a hypothetical), estimates each
+family's vanishing point via least-squares (SVD null-space, not noisy pairwise line
+intersections), then applies the standard Hartley & Zisserman affine-rectification construction
+from the two vanishing points' vanishing line. **Honest scope**: this removes the photo's
+projective (keystone) distortion, not a full metric reconstruction -- that would additionally
+need the two directions' known real-world orthogonality enforced via the circular points, which
+wasn't worth the added complexity here. Documented as such in the module itself.
+
+**Caught and fixed a real sign-error bug during verification, not just during writing**: the
+first version's "already near-nadir, skip correction" check tested the wrong vanishing-line
+coefficient (an already-flat, non-tilted synthetic test field was reporting `corrected: True`
+with a warp that turned out to be a pixel-perfect no-op -- mean absolute difference of exactly
+0.0 between input and "corrected" output). Fixed by checking the coefficients that actually
+drive the projective distortion, not the one that doesn't.
+
+**Verified with actual measurement, not just "it ran"**: re-detecting lines on a corrected
+output and comparing angular spread to the same detection on the tilted input -- row family
+spread tightened from 2.99° to 0.25° after correction (an 8° rotation + 5% scale + translation
+test case). Also verified honest-failure behavior (no vegetation, random noise, only one line
+direction found) never fabricates a correction.
+
+**Also fixed a genuine bug this surfaced, not just added a feature**: when tilt correction
+actually changes image dimensions, the Results "Detection" tab was showing the *original*
+(uncorrected) upload preview with boxes computed for the *corrected* geometry -- a real
+misalignment. `AnalysisResult` gained `analyzed_image` (the corrected frame as a data URL, only
+set when `tilt_corrected` is true, since the caller's own upload already matches otherwise) and
+both the Results Detection tab and the PDF export (`/api/report`) now use it instead of the
+client's original file whenever correction ran.
+
+12 new `TiltCorrector` tests (including the measured-parallelism-improvement test and every
+honest-failure path), 3 new pipeline-wiring tests, 2 new `/api/analyze` contract tests for the
+`correct_tilt` toggle — 135 backend tests passing total. Verified end-to-end in the browser: a
+synthetic tilted field photo correctly showed "· perspective corrected" + a "⇕ TILT CORRECTED"
+badge, and the displayed Detection-tab image was confirmed to be the backend-rendered corrected
+frame (a `data:` URL at the corrected dimensions), not the stale original preview.
+
 ## Key files
 
 | File | Purpose |
@@ -242,6 +289,7 @@ history/database involved at all.
 | `backend/app/services/opencv_processor.py` | Vegetation indices, heatmap, preprocessing |
 | `backend/app/services/texture_analyzer.py` | GLCM/Haralick texture uniformity (Phase P) |
 | `backend/app/services/flight_comparator.py` | ORB + homography flight-to-flight diff (Phase Q) |
+| `backend/app/services/tilt_corrector.py` | Vanishing-point perspective correction (Phase R) |
 | `backend/app/services/sam_segmenter.py` | Box-prompted SAM refinement |
 | `backend/app/services/report_generator.py` | PDF export |
 | `backend/app/api/analysis.py` | All three HTTP endpoints |

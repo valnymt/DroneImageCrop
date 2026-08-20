@@ -8,6 +8,7 @@ type Settings = {
   areaUnit: "ha" | "acres";
   enhancement: boolean;
   segmentationRefinement: boolean;
+  perspectiveCorrection: boolean;
   modelProfile: "sensitive" | "balanced" | "precise";
 };
 
@@ -15,6 +16,7 @@ const DEFAULT_SETTINGS: Settings = {
   areaUnit: "ha",
   enhancement: true,
   segmentationRefinement: true,
+  perspectiveCorrection: true,
   modelProfile: "balanced",
 };
 
@@ -68,6 +70,15 @@ type AnalysisResult = {
   // only, same scope boundary as the confidence badges (Phase M).
   texture_uniformity_score: number;
   texture_pattern: "uniform" | "mixed" | "patchy";
+  // Whether a perspective/tilt correction ran before analysis -- false is
+  // the common, expected case for an already-nadir photo, not a failure.
+  // tilt_correction_note always explains what happened either way.
+  tilt_corrected: boolean;
+  tilt_correction_note: string;
+  // Set only when tilt_corrected is true -- the frame detections/
+  // image_width/image_height are actually relative to, which the app's
+  // own original upload preview no longer matches at that point.
+  analyzed_image: string | null;
   estimated_yield: number;
   // The per-plant yield the backend actually used to compute
   // estimated_yield (its own crop-specific baseline, health/coverage-
@@ -380,6 +391,7 @@ export default function Home() {
       // yield (see YieldEstimator) rather than this app supplying one.
       formData.append("enhance", String(settings.enhancement));
       formData.append("refine_segmentation", String(settings.segmentationRefinement));
+      formData.append("correct_tilt", String(settings.perspectiveCorrection));
       formData.append("conf_threshold", String(MODEL_PROFILE_CONF[settings.modelProfile]));
       const res = await fetch(`${API_BASE}/api/analyze`, { method: "POST", body: formData });
       if (!res.ok) throw new Error(await parseError(res, `Analysis failed (${res.status}).`));
@@ -667,6 +679,9 @@ function Results({ data, file, areaUnit, onNew, onAdjust }: { data: Analysis; fi
         health_score: data.health_score,
         texture_uniformity_score: data.texture_uniformity_score,
         texture_pattern: data.texture_pattern,
+        tilt_corrected: data.tilt_corrected,
+        tilt_correction_note: data.tilt_correction_note,
+        analyzed_image: data.analyzed_image,
         estimated_yield: data.estimated_yield,
         average_yield_per_plant_kg: data.average_yield_per_plant_kg,
         confidence_score: data.confidence_score,
@@ -677,7 +692,14 @@ function Results({ data, file, areaUnit, onNew, onAdjust }: { data: Analysis; fi
         heatmap_overlay: data.heatmap_overlay,
       };
       const formData = new FormData();
-      formData.append("image", file);
+      // The PDF draws detection boxes at result.detections' coordinates,
+      // which are relative to the corrected frame once tilt correction
+      // ran -- the original upload no longer matches that geometry, so
+      // the corrected image has to go to the report generator instead.
+      const reportImage = data.tilt_corrected && data.analyzed_image
+        ? await (await fetch(data.analyzed_image)).blob()
+        : file;
+      formData.append("image", reportImage, file.name);
       formData.append("result", JSON.stringify(resultPayload));
       formData.append("field_name", data.name);
       formData.append("crop_type", data.crop);
@@ -731,7 +753,7 @@ function Results({ data, file, areaUnit, onNew, onAdjust }: { data: Analysis; fi
       </div>
     </div>}
     <section className="result-metrics">{[["PLANT COUNT", data.plant_count.toLocaleString(), "detected plants"], ["CROP DENSITY", densityValue.toLocaleString(undefined, {maximumFractionDigits: 2}), densityLabel], ["CROP COVERAGE", `${data.crop_coverage}%`, "segmented area"], ["HEALTH SCORE", `${Math.round(data.health_score)}/100`, "strong vegetation"], ["EST. HARVEST", `${data.estimated_yield.toLocaleString()} kg`, `${(data.estimated_yield / 1000).toFixed(2)} metric tons`]].map(([a,b,c]) => <article key={a}><small>{a}</small><b>{b}</b><span>{c}</span></article>)}</section>
-    <section className="vision-grid"><article className="panel vision-panel"><div className="panel-head"><div><h3>Computer vision output</h3><p>Detection and segmentation layers</p></div><div className="seg-tabs"><button className={tab === "detection" ? "selected" : ""} onClick={() => setTab("detection")}>Detection</button><button className={tab === "segmentation" ? "selected" : ""} onClick={() => setTab("segmentation")}>Segmentation</button><button className={tab === "heatmap" ? "selected" : ""} onClick={() => setTab("heatmap")}>Heatmap</button></div></div><div className="result-image" ref={imageContainerRef}>{tab === "detection" && data.image && <img src={data.image} alt="Analyzed crop field" />}{tab === "segmentation" && <img src={data.segmentation_overlay} alt="Segmentation mask overlay" />}{tab === "heatmap" && <img src={data.heatmap_overlay} alt="Vegetation density heatmap" />}{tab === "detection" && transform && data.detections.map((d, i) => <span key={i} className="bbox" style={{ left: d.x1 * transform.scaleX - transform.offsetX, top: d.y1 * transform.scaleY - transform.offsetY, width: (d.x2 - d.x1) * transform.scaleX, height: (d.y2 - d.y1) * transform.scaleY }}>{showBoxLabels ? `${d.label} .${Math.round(d.confidence * 100)}` : ""}</span>)}{tab === "detection" && <div className="model-badge">YOLO DETECTIONS · {data.plant_count.toLocaleString()}</div>}</div></article>
+    <section className="vision-grid"><article className="panel vision-panel"><div className="panel-head"><div><h3>Computer vision output</h3><p>Detection and segmentation layers{data.tilt_corrected ? " · perspective corrected" : ""}</p></div><div className="seg-tabs"><button className={tab === "detection" ? "selected" : ""} onClick={() => setTab("detection")}>Detection</button><button className={tab === "segmentation" ? "selected" : ""} onClick={() => setTab("segmentation")}>Segmentation</button><button className={tab === "heatmap" ? "selected" : ""} onClick={() => setTab("heatmap")}>Heatmap</button></div></div><div className="result-image" ref={imageContainerRef}>{tab === "detection" && (data.analyzed_image ?? data.image) && <img src={data.analyzed_image ?? data.image} alt="Analyzed crop field" />}{tab === "segmentation" && <img src={data.segmentation_overlay} alt="Segmentation mask overlay" />}{tab === "heatmap" && <img src={data.heatmap_overlay} alt="Vegetation density heatmap" />}{tab === "detection" && transform && data.detections.map((d, i) => <span key={i} className="bbox" style={{ left: d.x1 * transform.scaleX - transform.offsetX, top: d.y1 * transform.scaleY - transform.offsetY, width: (d.x2 - d.x1) * transform.scaleX, height: (d.y2 - d.y1) * transform.scaleY }}>{showBoxLabels ? `${d.label} .${Math.round(d.confidence * 100)}` : ""}</span>)}{tab === "detection" && <div className="model-badge">YOLO DETECTIONS · {data.plant_count.toLocaleString()}</div>}{tab === "detection" && data.tilt_corrected && <div className="model-badge tilt-badge">⇕ TILT CORRECTED</div>}</div></article>
     <article className={`panel insights health-${data.health_score >= 80 ? "good" : data.health_score >= 55 ? "mixed" : "poor"}`}><h3>Field intelligence</h3><p>Interpreted from visible RGB vegetation signals.</p><div className="score"><div className="score-ring" style={{"--score": `${data.health_score * 3.6}deg`} as React.CSSProperties}><span><b>{Math.round(data.health_score)}</b><small>/ 100</small></span></div><div><b>{healthLabel}</b><p>{healthCopy}</p></div></div><hr /><div className="insight-row"><span>GREEN VEGETATION RATIO</span><b>{data.vegetation_score.toFixed(1)}%</b></div><div className="bar"><i style={{width: `${data.vegetation_score}%`}} /></div><div className="insight-row"><span>TEXTURE PATTERN</span><b>{data.texture_pattern} · {data.texture_uniformity_score.toFixed(0)}%</b></div><div className={`bar texture-${data.texture_pattern}`}><i style={{width: `${data.texture_uniformity_score}%`}} /></div><div className="insight-row"><span>AVG. DETECTION CONFIDENCE</span><b>{data.confidence_score.toFixed(1)}%</b></div><div className="bar"><i style={{width: `${data.confidence_score}%`}} /></div><div className="method-warning"><b>RGB screening result</b><span>Color analysis can flag suspicious areas, but cannot distinguish disease from drought, mature crops, harvest residue, shadows, or soil without field context.</span></div><div className="method-warning"><b>Texture screening result</b><span>GLCM/Haralick texture on the segmented canopy separates uniform condition changes (drought, nutrient stress) from patchy ones (disease, pest damage) -- it flags a pattern, not a diagnosis.</span></div><div className="recommend"><b>Recommendation</b><p>{recommendation}</p></div></article></section>
   </div>;
 }
@@ -858,5 +880,5 @@ function Settings({ settings, onSave }: { settings: Settings; onSave: (next: Set
 
   const isDirty = JSON.stringify(draft) !== JSON.stringify(settings);
 
-  return <div className="page narrow"><section className="panel settings"><h3>Analysis defaults</h3><p>Configure how new field surveys are interpreted.</p><label>DEFAULT AREA UNIT<select value={draft.areaUnit} onChange={(e) => setDraft({...draft, areaUnit: e.target.value as Settings["areaUnit"]})}><option value="ha">Hectares (ha)</option><option value="acres">Acres</option></select></label><label>MODEL PROFILE<select value={draft.modelProfile} onChange={(e) => setDraft({...draft, modelProfile: e.target.value as Settings["modelProfile"]})}><option value="balanced">Balanced · Recommended</option><option value="sensitive">High sensitivity</option><option value="precise">High precision</option></select><small className="field-help">Sensitivity trades false negatives for false positives -- high sensitivity flags more candidate plants but with more mistakes; high precision is stricter and undercounts sparse fields.</small></label><div className="toggle-row"><span><b>Automatic image enhancement</b><small>Apply denoising and histogram normalization before detection.</small></span><button className={draft.enhancement ? "toggle on" : "toggle"} aria-label="Toggle enhancement" onClick={() => setDraft({...draft, enhancement: !draft.enhancement})}><i /></button></div><div className="toggle-row"><span><b>Segmentation refinement</b><small>Use SAM masks to refine crop coverage estimates.</small></span><button className={draft.segmentationRefinement ? "toggle on" : "toggle"} aria-label="Toggle segmentation" onClick={() => setDraft({...draft, segmentationRefinement: !draft.segmentationRefinement})}><i /></button></div><button className="primary compact" disabled={!isDirty} onClick={() => onSave(draft)}>{isDirty ? "Save preferences" : "Saved ✓"}</button></section></div>;
+  return <div className="page narrow"><section className="panel settings"><h3>Analysis defaults</h3><p>Configure how new field surveys are interpreted.</p><label>DEFAULT AREA UNIT<select value={draft.areaUnit} onChange={(e) => setDraft({...draft, areaUnit: e.target.value as Settings["areaUnit"]})}><option value="ha">Hectares (ha)</option><option value="acres">Acres</option></select></label><label>MODEL PROFILE<select value={draft.modelProfile} onChange={(e) => setDraft({...draft, modelProfile: e.target.value as Settings["modelProfile"]})}><option value="balanced">Balanced · Recommended</option><option value="sensitive">High sensitivity</option><option value="precise">High precision</option></select><small className="field-help">Sensitivity trades false negatives for false positives -- high sensitivity flags more candidate plants but with more mistakes; high precision is stricter and undercounts sparse fields.</small></label><div className="toggle-row"><span><b>Automatic image enhancement</b><small>Apply denoising and histogram normalization before detection.</small></span><button className={draft.enhancement ? "toggle on" : "toggle"} aria-label="Toggle enhancement" onClick={() => setDraft({...draft, enhancement: !draft.enhancement})}><i /></button></div><div className="toggle-row"><span><b>Segmentation refinement</b><small>Use SAM masks to refine crop coverage estimates.</small></span><button className={draft.segmentationRefinement ? "toggle on" : "toggle"} aria-label="Toggle segmentation" onClick={() => setDraft({...draft, segmentationRefinement: !draft.segmentationRefinement})}><i /></button></div><div className="toggle-row"><span><b>Perspective correction</b><small>Straighten non-nadir (tilted/handheld) photos using detected row lines before analysis.</small></span><button className={draft.perspectiveCorrection ? "toggle on" : "toggle"} aria-label="Toggle perspective correction" onClick={() => setDraft({...draft, perspectiveCorrection: !draft.perspectiveCorrection})}><i /></button></div><button className="primary compact" disabled={!isDirty} onClick={() => onSave(draft)}>{isDirty ? "Save preferences" : "Saved ✓"}</button></section></div>;
 }

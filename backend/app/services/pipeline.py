@@ -8,6 +8,7 @@ from app.services.opencv_processor import OpenCVProcessor
 from app.services.sam_segmenter import SAMSegmenter
 from app.services.schemas import AnalysisResult
 from app.services.texture_analyzer import TextureAnalyzer
+from app.services.tilt_corrector import TiltCorrector
 from app.services.yield_estimator import YieldEstimator
 from app.services.yolo_detector import CONF_THRESHOLD, YOLODetector
 
@@ -35,6 +36,7 @@ class CropAnalysisPipeline:
         self.detector = YOLODetector()
         self.segmenter = SAMSegmenter()
         self.texture = TextureAnalyzer()
+        self.tilt = TiltCorrector()
         self.yield_estimator = YieldEstimator()
 
     def analyze(
@@ -45,9 +47,17 @@ class CropAnalysisPipeline:
         average_kg: float | None = None,
         enhance: bool = True,
         refine_segmentation: bool = True,
+        correct_tilt: bool = True,
         conf_threshold: float = CONF_THRESHOLD,
     ) -> AnalysisResult:
         image = self.cv.load_and_preprocess(path, enhance=enhance)
+        # Runs before every other analysis step -- density, coverage, and
+        # detection are all measured on whatever geometry `image` ends up
+        # with, so a tilt correction has to happen first to actually help,
+        # not be computed afterward as a side note.
+        tilt = self.tilt.correct(image) if correct_tilt else None
+        if tilt is not None and tilt.corrected:
+            image = tilt.image
         vegetation = self.cv.vegetation_metrics(image)
         detections = self.detector.detect(image, conf_threshold=conf_threshold)
         plant_count = len(detections)
@@ -79,6 +89,16 @@ class CropAnalysisPipeline:
             health_score=health,
             texture_uniformity_score=texture.uniformity_score,
             texture_pattern=texture.pattern,
+            tilt_corrected=bool(tilt is not None and tilt.corrected),
+            tilt_correction_note=tilt.note if tilt is not None else "Perspective correction disabled for this analysis.",
+            # Only set when tilt correction actually changed the image's
+            # geometry -- detections/image_width/image_height are all
+            # relative to the corrected frame at that point, but the
+            # caller's own original upload isn't. Omitted otherwise (the
+            # common case) since the caller's original upload already
+            # matches this pipeline's geometry exactly and re-sending the
+            # same bytes would just be wasted payload.
+            analyzed_image=encode_png_data_url(image) if (tilt is not None and tilt.corrected) else None,
             estimated_yield=estimated,
             average_yield_per_plant_kg=round(per_plant_kg, 3),
             confidence_score=round(confidence, 2),

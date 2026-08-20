@@ -14,6 +14,8 @@ def make_result(**overrides) -> AnalysisResult:
         health_score=58.0,
         texture_uniformity_score=60.0,
         texture_pattern="mixed",
+        tilt_corrected=False,
+        tilt_correction_note="No correction needed.",
         estimated_yield=2.16,
         average_yield_per_plant_kg=0.18,
         confidence_score=71.4,

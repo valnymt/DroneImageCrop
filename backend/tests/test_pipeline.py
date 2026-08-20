@@ -114,3 +114,53 @@ class TestTextureAffectsHealthScore:
 
         assert result.texture_pattern == "mixed"  # empty mask -> neutral default
         assert result.texture_uniformity_score == 50.0
+
+
+class TestTiltCorrectionWiring:
+    def test_correct_tilt_false_skips_tilt_correction_entirely(self, tmp_path):
+        pipeline = _mocked_pipeline()
+        pipeline.tilt = MagicMock()
+        path = tmp_path / "img.jpg"
+        cv2.imwrite(str(path), np.zeros((50, 50, 3), dtype=np.uint8))
+
+        result = pipeline.analyze(path, "Wheat", 2.0, correct_tilt=False)
+
+        pipeline.tilt.correct.assert_not_called()
+        assert result.tilt_corrected is False
+        assert "disabled" in result.tilt_correction_note.lower()
+
+    def test_correct_tilt_true_by_default_calls_tilt_corrector(self, tmp_path):
+        pipeline = _mocked_pipeline()
+        pipeline.tilt = MagicMock()
+        pipeline.tilt.correct.return_value = SimpleNamespace(
+            corrected=False, image=np.zeros((50, 50, 3), dtype=np.uint8), note="Not enough visible line structure.",
+        )
+        path = tmp_path / "img.jpg"
+        cv2.imwrite(str(path), np.zeros((50, 50, 3), dtype=np.uint8))
+
+        result = pipeline.analyze(path, "Wheat", 2.0)
+
+        pipeline.tilt.correct.assert_called_once()
+        assert result.tilt_corrected is False
+        assert result.tilt_correction_note == "Not enough visible line structure."
+
+    def test_downstream_analysis_uses_the_corrected_image_when_tilt_was_corrected(self, tmp_path):
+        # The whole point of running this before everything else: once a
+        # correction is applied, vegetation/detection must see the
+        # corrected geometry, not the original tilted photo.
+        pipeline = _mocked_pipeline()
+        corrected_image = np.full((64, 96, 3), (60, 150, 60), dtype=np.uint8)
+        pipeline.segmenter.refine.return_value = np.zeros((64, 96), dtype=np.uint8)
+        pipeline.tilt = MagicMock()
+        pipeline.tilt.correct.return_value = SimpleNamespace(corrected=True, image=corrected_image, note="Perspective corrected.")
+        path = tmp_path / "img.jpg"
+        cv2.imwrite(str(path), np.zeros((50, 50, 3), dtype=np.uint8))
+
+        result = pipeline.analyze(path, "Wheat", 2.0)
+
+        veg_call_image = pipeline.cv.vegetation_metrics.call_args[0][0]
+        assert veg_call_image.shape == corrected_image.shape
+        assert np.array_equal(veg_call_image, corrected_image)
+        assert result.tilt_corrected is True
+        assert result.image_width == 96 and result.image_height == 64
+        assert result.tilt_correction_note == "Perspective corrected."

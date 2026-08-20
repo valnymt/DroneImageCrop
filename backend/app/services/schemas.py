@@ -25,6 +25,19 @@ class AnalysisResult(BaseModel):
     # measure texture from at all.
     texture_uniformity_score: float = Field(ge=0, le=100)
     texture_pattern: str
+    # Whether a perspective/tilt correction (see
+    # app/services/tilt_corrector.py) was applied before analysis -- False
+    # is the common, expected case for a photo that was already close to
+    # straight-down, not a failure. tilt_correction_note always explains
+    # what happened either way (why it was/wasn't applied).
+    tilt_corrected: bool
+    tilt_correction_note: str
+    # Only set when tilt_corrected is True -- the actual analyzed frame
+    # (data: URL), which detections/image_width/image_height are relative
+    # to and which the caller's own original upload no longer matches.
+    # None the rest of the time; callers should fall back to their own
+    # original image, which is identical in that case anyway.
+    analyzed_image: str | None = None
     estimated_yield: float = Field(ge=0)
     # The per-plant yield actually used to compute estimated_yield --
     # either a caller-supplied override or the pipeline's own crop-specific

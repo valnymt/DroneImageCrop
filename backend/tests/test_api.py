@@ -23,6 +23,8 @@ FAKE_RESULT = AnalysisResult(
     health_score=58.0,
     texture_uniformity_score=72.0,
     texture_pattern="uniform",
+    tilt_corrected=False,
+    tilt_correction_note="Photo already appears close to straight-down (nadir); no correction needed.",
     estimated_yield=30.2,
     average_yield_per_plant_kg=0.02,
     confidence_score=88.0,
@@ -139,13 +141,24 @@ def test_analyze_passes_settings_through_to_pipeline(mock_pipeline):
     client.post(
         "/api/analyze",
         files={"image": ("test.jpg", b"fake-bytes", "image/jpeg")},
-        data={**VALID_FORM, "enhance": "false", "refine_segmentation": "false", "conf_threshold": "0.4"},
+        data={**VALID_FORM, "enhance": "false", "refine_segmentation": "false", "correct_tilt": "false", "conf_threshold": "0.4"},
     )
 
     _, kwargs = mock_pipeline.analyze.call_args
     assert kwargs["enhance"] is False
     assert kwargs["refine_segmentation"] is False
+    assert kwargs["correct_tilt"] is False
     assert kwargs["conf_threshold"] == 0.4
+
+
+@patch("app.api.analysis.pipeline")
+def test_analyze_defaults_correct_tilt_to_true(mock_pipeline):
+    mock_pipeline.analyze.return_value = FAKE_RESULT
+
+    client.post("/api/analyze", files={"image": ("test.jpg", b"fake-bytes", "image/jpeg")}, data=VALID_FORM)
+
+    _, kwargs = mock_pipeline.analyze.call_args
+    assert kwargs["correct_tilt"] is True
 
 
 @patch("app.api.analysis.pipeline")

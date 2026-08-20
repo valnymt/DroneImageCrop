@@ -40,6 +40,7 @@ async def analyze(
     average_yield_per_plant_kg: float | None = Form(None, gt=0),
     enhance: bool = Form(True),
     refine_segmentation: bool = Form(True),
+    correct_tilt: bool = Form(True),
     conf_threshold: float = Form(0.25, ge=0, le=1),
 ) -> AnalysisResult:
     if image.content_type not in {"image/jpeg", "image/png"}:
@@ -51,7 +52,8 @@ async def analyze(
     try:
         return pipeline.analyze(
             path, crop_type, field_size_hectares, average_yield_per_plant_kg,
-            enhance=enhance, refine_segmentation=refine_segmentation, conf_threshold=conf_threshold,
+            enhance=enhance, refine_segmentation=refine_segmentation,
+            correct_tilt=correct_tilt, conf_threshold=conf_threshold,
         )
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
