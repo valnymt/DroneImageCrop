@@ -4,26 +4,12 @@ Drone crop intelligence app. Next.js/vinext frontend (`app/page.tsx`, one file, 
 FastAPI computer-vision backend (`backend/`) + Cloudflare D1 for history persistence.
 Repo: `https://github.com/valnymt/DroneImageCrop.git` (remote `origin`, on branch `main`).
 
-## ⚠️ Uncommitted work — read this first
+## Current state
 
-Phases A/B/C are committed and pushed (last pushed commit: `95d37fb`).
-**Everything from the tiling fix through Phase I is still uncommitted** in the working tree:
-
-```
- M app/globals.css                          M backend/app/services/schemas.py
- M app/page.tsx                             M backend/app/services/yolo_detector.py
- M backend/app/api/analysis.py              M backend/requirements.txt
- M backend/app/main.py                      M backend/tests/test_api.py
- M backend/app/services/opencv_processor.py M backend/tests/test_opencv_processor.py
- M backend/app/services/pipeline.py         M backend/tests/test_schemas.py
-?? backend/app/services/image_encoding.py   ?? backend/tests/test_pipeline.py
-?? backend/app/services/report_generator.py ?? backend/tests/test_report_generator.py
-?? backend/tests/test_image_encoding.py     ?? backend/tests/test_yolo_detector.py
-```
-
-If you start a new chat on this repo, the first thing to decide is whether to commit this
-(it's all tested and working — see below) before doing anything else. It was left uncommitted
-only because the user hadn't asked for a commit yet.
+Working tree is clean. Everything through Phase I is committed and pushed to `origin/main`
+(commit `cb23660`). **Phase J is also committed and pushed** (`127bb8c`) — see below; it was
+made directly by the user outside this session, so it hasn't been tested/verified the way
+Phases A–I were.
 
 ## How to run it
 
@@ -97,9 +83,19 @@ successful `/analyze` call. Two independent processes; both must be running.
   real YOLO confidence thresholds (0.15/0.25/0.4), area unit is a real ha/acres conversion
   across Upload/Results/History, persisted to `localStorage`.
 
-All of the above have real backend + frontend tests (78 backend tests passing) and were
+- **Phase J** *(not done in this session — see caveat above)* — Removes the manual
+  crop/area/yield form entirely; `/inspect`'s CLIP + EXIF/XMP prediction feeds `/analyze`
+  directly with no confirmation step. `analyze()` now awaits any in-flight inspection so it
+  can't submit stale defaults while a prediction is still loading. Results still shows the
+  AI's prediction read-only, so a wrong guess is visible rather than silently authoritative.
+  Worth noting: this reverses Phase C's original design intent (CLIP is ~69% accurate, which
+  is why Phase C deliberately made it a dismissible *suggestion* rather than authoritative) —
+  if picking this back up, that tradeoff is worth understanding before extending it further.
+
+All of Phases A–I have real backend + frontend tests (78 backend tests passing) and were
 verified live in a browser, not just unit-tested — see individual commit-message-style
-descriptions in the conversation this file came from if you need the detail.
+descriptions in the conversation this file came from if you need the detail. Phase J has
+neither backend nor frontend test coverage and hasn't been browser-verified.
 
 ## One open item
 
