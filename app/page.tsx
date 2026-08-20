@@ -86,7 +86,19 @@ type InspectResult = {
   area_source: string;
 };
 
-type SessionMeta = { name: string; crop: string; date: string; image?: string; fieldAreaHectares: number };
+type SessionMeta = {
+  name: string;
+  crop: string;
+  date: string;
+  image?: string;
+  fieldAreaHectares: number;
+  // Carried from the /inspect call straight into Results (see Phase M) so
+  // a wrong AI guess is visible there, not just silently used -- null
+  // means inspection never completed (e.g. network failure), which is
+  // itself worth showing as "not verified" rather than hiding.
+  cropConfidence: number | null;
+  areaSource: string | null;
+};
 
 type Analysis = AnalysisResult & SessionMeta & { id: number };
 
@@ -235,6 +247,10 @@ export default function Home() {
   // (flight altitude) instead of silently keeping the stale default area.
   const [areaSource, setAreaSource] = useState<string | null>(null);
   const [manualAltitude, setManualAltitude] = useState("");
+  // CLIP's own confidence in its crop-type guess (0-100) -- surfaced in
+  // Results (Phase M) so a low-confidence guess is visibly flagged rather
+  // than presented with the same certainty as a high-confidence one.
+  const [cropConfidence, setCropConfidence] = useState<number | null>(null);
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
   const inputRef = useRef<HTMLInputElement>(null);
   const inspectRequestId = useRef(0);
@@ -295,6 +311,7 @@ export default function Home() {
     setAreaSuggested(false);
     setAreaSource(null);
     setManualAltitude("");
+    setCropConfidence(null);
     inspectPromiseRef.current = inspectImage(f);
   }
 
@@ -314,6 +331,7 @@ export default function Home() {
       if (SUPPORTED_CROPS.includes(result.crop_type)) applyCrop(result.crop_type, true);
       if (result.estimated_area_hectares != null) applyArea(String(result.estimated_area_hectares), true);
       setAreaSource(result.area_source);
+      setCropConfidence(result.confidence);
     } catch {
       // Best-effort only: network error, timeout/abort, or the backend
       // being down. Falls back to the last-known crop/area defaults so
@@ -363,6 +381,8 @@ export default function Home() {
         date: new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }),
         image: preview,
         fieldAreaHectares: Number(area),
+        cropConfidence,
+        areaSource,
       };
       const analysis: Analysis = { id: Date.now(), ...result, ...meta };
       setLatest(analysis);
@@ -492,7 +512,34 @@ function Upload(p: any) {
   </div>;
 }
 
+// Human-readable label + confidence tier for each area_source the backend
+// can return (see backend/app/services/field_area_estimator.py) -- shown
+// in Results so a fallback/default estimate reads differently from a real
+// measurement, instead of both looking equally authoritative.
+const AREA_SOURCE_INFO: Record<string, { label: string; tier: "high" | "medium" | "low" }> = {
+  exif_gps_altitude: { label: "measured from the photo's GPS altitude", tier: "high" },
+  exif_gps_altitude_default_focal: { label: "measured from GPS altitude (assumed lens)", tier: "medium" },
+  xmp_relative_altitude: { label: "measured from the drone's recorded flight altitude", tier: "high" },
+  xmp_relative_altitude_default_focal: { label: "measured from flight altitude (assumed lens)", tier: "medium" },
+  manual_altitude: { label: "calculated from the altitude you entered", tier: "high" },
+  manual_altitude_default_focal: { label: "calculated from your altitude (assumed lens)", tier: "medium" },
+  row_spacing_estimate: { label: "estimated from visible crop-row spacing in the photo", tier: "medium" },
+};
+
+function confidenceTier(confidence: number | null): "high" | "medium" | "low" {
+  if (confidence == null) return "low";
+  if (confidence >= 70) return "high";
+  if (confidence >= 40) return "medium";
+  return "low";
+}
+
 function Results({ data, file, areaUnit, onNew }: { data: Analysis; file: File | null; areaUnit: "ha" | "acres"; onNew: () => void }) {
+  const cropTier = confidenceTier(data.cropConfidence);
+  const areaInfo = data.areaSource ? AREA_SOURCE_INFO[data.areaSource] : undefined;
+  // No entry in AREA_SOURCE_INFO means "unavailable" (or inspection never
+  // completed) -- area is a plain default, never measured from this photo.
+  const areaTier = areaInfo?.tier ?? "low";
+  const areaLabel = areaInfo?.label ?? "not measured from this photo — default estimate";
   const densityValue = areaUnit === "acres" ? data.crop_density / ACRES_PER_HA : data.crop_density;
   const densityLabel = areaUnit === "acres" ? "plants / acre" : "plants / hectare";
   const [exporting, setExporting] = useState(false);
@@ -584,6 +631,16 @@ function Results({ data, file, areaUnit, onNew }: { data: Analysis; file: File |
 
   return <div className="page"><div className="result-top"><div><span className="success">✓ ANALYSIS SUCCESSFUL</span><p>{data.name} · {data.crop} · {data.date}</p></div><div><button className="ghost" onClick={exportReport} disabled={exporting || !file}>{exporting ? <><span className="spinner spinner-dark" /> Generating…</> : "Export report"}</button><button className="primary compact" onClick={onNew}>Analyze another</button></div></div>
     {exportError && <div className="tech-note error-note"><b>⚠ Export failed</b><span>{exportError}</span></div>}
+    <div className="ai-confidence-row">
+      <div className={`confidence-badge tier-${cropTier}`}>
+        <span className="confidence-dot" />
+        <span><b>Crop type: {data.crop}</b><small>{data.cropConfidence == null ? "not verified — inspection didn't complete" : `${data.cropConfidence.toFixed(0)}% AI confidence`}</small></span>
+      </div>
+      <div className={`confidence-badge tier-${areaTier}`}>
+        <span className="confidence-dot" />
+        <span><b>Field area: {data.fieldAreaHectares.toLocaleString(undefined, {maximumFractionDigits: 2})} ha</b><small>{areaLabel}</small></span>
+      </div>
+    </div>
     <section className="result-metrics">{[["PLANT COUNT", data.plant_count.toLocaleString(), "detected plants"], ["CROP DENSITY", densityValue.toLocaleString(undefined, {maximumFractionDigits: 2}), densityLabel], ["CROP COVERAGE", `${data.crop_coverage}%`, "segmented area"], ["HEALTH SCORE", `${Math.round(data.health_score)}/100`, "strong vegetation"], ["EST. HARVEST", `${data.estimated_yield.toLocaleString()} kg`, `${(data.estimated_yield / 1000).toFixed(2)} metric tons`]].map(([a,b,c]) => <article key={a}><small>{a}</small><b>{b}</b><span>{c}</span></article>)}</section>
     <section className="vision-grid"><article className="panel vision-panel"><div className="panel-head"><div><h3>Computer vision output</h3><p>Detection and segmentation layers</p></div><div className="seg-tabs"><button className={tab === "detection" ? "selected" : ""} onClick={() => setTab("detection")}>Detection</button><button className={tab === "segmentation" ? "selected" : ""} onClick={() => setTab("segmentation")}>Segmentation</button><button className={tab === "heatmap" ? "selected" : ""} onClick={() => setTab("heatmap")}>Heatmap</button></div></div><div className="result-image" ref={imageContainerRef}>{tab === "detection" && data.image && <img src={data.image} alt="Analyzed crop field" />}{tab === "segmentation" && <img src={data.segmentation_overlay} alt="Segmentation mask overlay" />}{tab === "heatmap" && <img src={data.heatmap_overlay} alt="Vegetation density heatmap" />}{tab === "detection" && transform && data.detections.map((d, i) => <span key={i} className="bbox" style={{ left: d.x1 * transform.scaleX - transform.offsetX, top: d.y1 * transform.scaleY - transform.offsetY, width: (d.x2 - d.x1) * transform.scaleX, height: (d.y2 - d.y1) * transform.scaleY }}>{showBoxLabels ? `${d.label} .${Math.round(d.confidence * 100)}` : ""}</span>)}{tab === "detection" && <div className="model-badge">YOLO DETECTIONS · {data.plant_count.toLocaleString()}</div>}</div></article>
     <article className={`panel insights health-${data.health_score >= 80 ? "good" : data.health_score >= 55 ? "mixed" : "poor"}`}><h3>Field intelligence</h3><p>Interpreted from visible RGB vegetation signals.</p><div className="score"><div className="score-ring" style={{"--score": `${data.health_score * 3.6}deg`} as React.CSSProperties}><span><b>{Math.round(data.health_score)}</b><small>/ 100</small></span></div><div><b>{healthLabel}</b><p>{healthCopy}</p></div></div><hr /><div className="insight-row"><span>GREEN VEGETATION RATIO</span><b>{data.vegetation_score.toFixed(1)}%</b></div><div className="bar"><i style={{width: `${data.vegetation_score}%`}} /></div><div className="insight-row"><span>AVG. DETECTION CONFIDENCE</span><b>{data.confidence_score.toFixed(1)}%</b></div><div className="bar"><i style={{width: `${data.confidence_score}%`}} /></div><div className="method-warning"><b>RGB screening result</b><span>Color analysis can flag suspicious areas, but cannot distinguish disease from drought, mature crops, harvest residue, shadows, or soil without field context.</span></div><div className="recommend"><b>Recommendation</b><p>{recommendation}</p></div></article></section>
