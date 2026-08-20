@@ -8,6 +8,13 @@
       "when": 1786550335595,
       "tag": "0000_nifty_the_captain",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1787250741784,
+      "tag": "0001_glamorous_daredevil",
+      "breakpoints": true
     }
   ]
 }

@@ -153,6 +153,15 @@ type D1AnalysisRow = {
   estimatedYield: number;
   confidenceScore: number;
   imagePath: string | null;
+  // Phases P/R/S -- nullable because rows written before this migration
+  // (or by an older-shaped payload) genuinely don't have these, not
+  // because they failed to compute.
+  textureUniformityScore: number | null;
+  texturePattern: string | null;
+  tiltCorrected: boolean | null;
+  plantSizeMeanAreaCm2: number | null;
+  plantSizeUniformityScore: number | null;
+  plantSizeMeanAspectRatio: number | null;
 };
 
 type HistoryRow = {
@@ -168,6 +177,9 @@ type HistoryRow = {
   health_score: number;
   estimated_yield: number;
   confidence_score: number;
+  texture_pattern: string | null;
+  tilt_corrected: boolean | null;
+  plant_size_uniformity_score: number | null;
 };
 
 function toHistoryRow(row: D1AnalysisRow): HistoryRow {
@@ -187,6 +199,9 @@ function toHistoryRow(row: D1AnalysisRow): HistoryRow {
     health_score: row.healthScore,
     estimated_yield: row.estimatedYield,
     confidence_score: row.confidenceScore,
+    texture_pattern: row.texturePattern,
+    tilt_corrected: row.tiltCorrected,
+    plant_size_uniformity_score: row.plantSizeUniformityScore,
   };
 }
 
@@ -443,6 +458,12 @@ export default function Home() {
             estimated_yield: result.estimated_yield,
             confidence_score: result.confidence_score,
             image_path: file.name,
+            texture_uniformity_score: result.texture_uniformity_score,
+            texture_pattern: result.texture_pattern,
+            tilt_corrected: result.tilt_corrected,
+            plant_size_mean_area_cm2: result.plant_size_stats?.mean_area_cm2 ?? null,
+            plant_size_uniformity_score: result.plant_size_stats?.size_uniformity_score ?? null,
+            plant_size_mean_aspect_ratio: result.plant_size_stats?.mean_aspect_ratio ?? null,
           }),
         });
         fetchHistory();
@@ -473,7 +494,7 @@ export default function Home() {
       <section className="content">
         <header><div><span className="eyebrow">DRONE CROP INTELLIGENCE</span><h1>{view === "dashboard" ? "Field overview" : view === "analyze" ? "Analyze a field" : view === "results" ? "Analysis complete" : view === "history" ? "Field history" : view === "compare" ? "Compare flights" : "System settings"}</h1></div><div className="header-actions"><button className="icon-btn">?</button><button className="icon-btn">♢</button><button className="primary compact" onClick={() => setView("analyze")}>＋ New analysis</button></div></header>
 
-        {view === "dashboard" && <Dashboard records={records} totals={totals} onAnalyze={() => setView("analyze")} onHistory={() => setView("history")} />}
+        {view === "dashboard" && <Dashboard records={records} totals={totals} onAnalyze={() => setView("analyze")} onHistory={() => setView("history")} onCompare={() => setView("compare")} />}
         {view === "analyze" && <Upload file={file} preview={preview} fieldName={fieldName} crop={crop} area={area} analyzing={analyzing} error={analyzeError} inspecting={inspecting} cropSuggested={cropSuggested} areaSuggested={areaSuggested} areaSource={areaSource} manualAltitude={manualAltitude} setManualAltitude={setManualAltitude} onEstimateAltitude={estimateWithManualAltitude} areaUnit={settings.areaUnit} inputRef={inputRef} onFile={chooseFile} setFieldName={setFieldName} run={runAnalysis} />}
         {view === "results" && latest && <Results data={latest} file={file} areaUnit={settings.areaUnit} onNew={() => setView("analyze")} onAdjust={(patch) => setLatest((prev) => prev ? { ...prev, ...patch } : prev)} />}
         {view === "history" && <History records={records} loading={historyLoading} error={historyError} onRetry={fetchHistory} areaUnit={settings.areaUnit} />}
@@ -484,7 +505,7 @@ export default function Home() {
   );
 }
 
-function Dashboard({ records, totals, onAnalyze, onHistory }: { records: HistoryRow[]; totals: { plants: number; yieldKg: number; density: number }; onAnalyze: () => void; onHistory: () => void }) {
+function Dashboard({ records, totals, onAnalyze, onHistory, onCompare }: { records: HistoryRow[]; totals: { plants: number; yieldKg: number; density: number }; onAnalyze: () => void; onHistory: () => void; onCompare: () => void }) {
   const [period, setPeriod] = useState<"3" | "6" | "12" | "all">("6");
 
   const thisMonth = monthKey(new Date());
@@ -504,6 +525,23 @@ function Dashboard({ records, totals, onAnalyze, onHistory }: { records: History
     ["ESTIMATED HARVEST", `${(totals.yieldKg / 1000).toFixed(1)} t`, "Across all fields", "◒"],
   ];
 
+  // Records written before Phases P/R/S (or by an older backend build)
+  // genuinely have none of this -- the section is hidden entirely rather
+  // than showing zeroed-out tiles that would misread as "nothing found".
+  const withTexture = records.filter((r) => r.texture_pattern);
+  const patchyCount = withTexture.filter((r) => r.texture_pattern === "patchy").length;
+  const tiltCorrectedCount = records.filter((r) => r.tilt_corrected).length;
+  const withSize = records.filter((r) => r.plant_size_uniformity_score != null);
+  const avgSizeUniformity = withSize.length
+    ? withSize.reduce((n, r) => n + (r.plant_size_uniformity_score ?? 0), 0) / withSize.length
+    : null;
+  const hasAiSignals = withTexture.length > 0 || tiltCorrectedCount > 0 || withSize.length > 0;
+  const aiSignalStats = [
+    ["PATCHY TEXTURE FLAGGED", withTexture.length ? `${patchyCount} / ${withTexture.length}` : "—", "possible disease/pest pattern", "◆"],
+    ["PERSPECTIVE CORRECTED", String(tiltCorrectedCount), "non-nadir photos straightened", "⇕"],
+    ["AVG. SIZE UNIFORMITY", avgSizeUniformity == null ? "—" : `${Math.round(avgSizeUniformity)}/100`, "stand establishment evenness", "⊞"],
+  ];
+
   const allBuckets = bucketHealthByMonth(records);
   const cutoff = period === "all" ? -Infinity : thisMonth - (Number(period) - 1);
   const buckets = allBuckets.filter((b) => b.key >= cutoff);
@@ -519,11 +557,13 @@ function Dashboard({ records, totals, onAnalyze, onHistory }: { records: History
 
   return <div className="page">
     <section className="hero">
-      <div><span className="tag"><span className="pulse" /> LIVE CROP MONITORING</span><h2>Turn aerial imagery into<br /><em>actionable crop insight.</em></h2><p>Analyze plant populations, vegetation health, crop coverage and projected harvests—powered by computer vision.</p><div><button className="primary" onClick={onAnalyze}>Analyze drone imagery <span>→</span></button><button className="ghost" onClick={onHistory}>View recent fields</button></div></div>
+      <div><span className="tag"><span className="pulse" /> LIVE CROP MONITORING</span><h2>Turn aerial imagery into<br /><em>actionable crop insight.</em></h2><p>Analyze plant populations, vegetation health, crop coverage and projected harvests—powered by computer vision.</p><div><button className="primary" onClick={onAnalyze}>Analyze drone imagery <span>→</span></button><button className="ghost" onClick={onHistory}>View recent fields</button></div><button className="hero-compare-link" onClick={onCompare}>⇄ New: compare two flights to see what changed <span>→</span></button></div>
       <div className="field-card"><div className="field-image"><div className="scanline" /><span className="bbox b1">48</span><span className="bbox b2">92</span><span className="bbox b3">71</span><div className="map-label">◉ LIVE MODEL VIEW</div></div><div className="field-caption"><span><small>MODEL CONFIDENCE</small><b>94.8%</b></span><span><small>VEGETATION SIGNAL</small><b className="green">Strong</b></span></div></div>
     </section>
     <div className="section-title"><span>Portfolio performance</span><small>Updated moments ago</small></div>
     <section className="stat-grid">{stats.map(([label, value, sub, icon]) => <article className="stat" key={label}><div className="stat-icon">{icon}</div><small>{label}</small><strong>{value}</strong><p>{sub}</p></article>)}</section>
+    {hasAiSignals && <><div className="section-title"><span>AI signal coverage</span><small>From texture, tilt, and per-plant size analysis</small></div>
+    <section className="stat-grid ai-signal-grid">{aiSignalStats.map(([label, value, sub, icon]) => <article className="stat" key={label}><div className="stat-icon">{icon}</div><small>{label}</small><strong>{value}</strong><p>{sub}</p></article>)}</section></>}
     <section className="lower-grid">
       <article className="panel chart-panel"><div className="panel-head"><div><h3>Crop health trend</h3><p>Average health score across analyzed fields</p></div><select aria-label="Time period" value={period} onChange={(e) => setPeriod(e.target.value as "3" | "6" | "12" | "all")}><option value="3">Last 3 months</option><option value="6">Last 6 months</option><option value="12">Last 12 months</option><option value="all">All time</option></select></div>{points.length === 0 ? <p style={{fontSize: 10, color: "#7a837c", margin: "20px 0"}}>No analyses yet — run one to start tracking health trends.</p> : <div className="chart"><div className="yaxis"><span>100</span><span>75</span><span>50</span><span>25</span></div><div className="chart-area"><div className="gridlines" /><div className="trend-chart"><svg viewBox="0 0 100 100" preserveAspectRatio="none">{areaPath && <path d={areaPath} fill="#8cbc7640" stroke="none" />}{points.length > 1 && <path d={linePath} fill="none" stroke="#397452" strokeWidth={2} vectorEffect="non-scaling-stroke" />}</svg>{points.map((p, i) => <div key={i} className="point" style={{left: `${p.x}%`, top: `${p.y}%`}} />)}</div><div className="xaxis">{points.map((p, i) => <span key={i}>{p.label}</span>)}</div></div></div>}</article>
       <article className="panel recent"><div className="panel-head"><div><h3>Recent analyses</h3><p>Latest processed imagery</p></div><button onClick={onHistory}>View all →</button></div>{records.length === 0 && <p style={{fontSize: 10, color: "#7a837c"}}>No analyses yet.</p>}{records.slice(0, 3).map((r, i) => <div className="recent-row" key={r.id}><div className={`thumb t${i + 1}`} /><span><b>{r.name}</b><small>{r.crop} · {r.date}</small></span><div className="health-ring" style={{"--score": `${r.health_score * 3.6}deg`} as React.CSSProperties}>{Math.round(r.health_score)}</div></div>)}</article>
@@ -799,11 +839,11 @@ function History({ records, loading, error, onRetry, areaUnit }: { records: Hist
 
   return <div className="page"><section className="panel history"><div className="panel-head"><div><h3>Analysis archive</h3><p>{loading ? "Loading…" : error ? "Unable to load history" : isFiltered ? `${filtered.length} of ${records.length} processed field surveys` : `${records.length} processed field surveys`}</p></div><div><input placeholder="Search fields…" value={search} onChange={(e) => setSearch(e.target.value)} /><select aria-label="Filter by crop" value={cropFilter} onChange={(e) => setCropFilter(e.target.value)}><option value="all">All crops</option>{cropOptions.map((c) => <option key={c} value={c}>{c}</option>)}</select></div></div>
     {error && <div className="tech-note error-note"><b>⚠ {error}</b><span><button className="ghost" onClick={onRetry}>Retry</button></span></div>}
-    {!error && <div className="table"><div className="tr th"><span>FIELD</span><span>DATE</span><span>PLANTS</span><span>{densityHeader}</span><span>HEALTH</span><span>EST. YIELD</span></div>
+    {!error && <div className="table"><div className="tr th"><span>FIELD</span><span>DATE</span><span>PLANTS</span><span>{densityHeader}</span><span>HEALTH</span><span>EST. YIELD</span><span>SIGNALS</span></div>
     {loading && <div className="tr"><span>Loading analysis history…</span></div>}
     {!loading && records.length === 0 && <div className="tr"><span>No analyses yet. Run one from “New analysis”.</span></div>}
     {!loading && records.length > 0 && filtered.length === 0 && <div className="tr"><span>No analyses match your search or filter.</span></div>}
-    {!loading && filtered.map((r, i) => <div className="tr" key={r.id}><span className="field-cell"><i className={`thumb t${i % 3 + 1}`} /><span><b>{r.name}</b><small>{r.crop}</small></span></span><span>{r.date}</span><span>{r.plant_count.toLocaleString()}</span><span>{toDisplayDensity(r.crop_density)}</span><span><em className="health-pill">● {Math.round(r.health_score)}</em></span><span><b>{r.estimated_yield.toLocaleString()} kg</b></span></div>)}</div>}
+    {!loading && filtered.map((r, i) => <div className="tr" key={r.id}><span className="field-cell"><i className={`thumb t${i % 3 + 1}`} /><span><b>{r.name}</b><small>{r.crop}</small></span></span><span>{r.date}</span><span>{r.plant_count.toLocaleString()}</span><span>{toDisplayDensity(r.crop_density)}</span><span><em className="health-pill">● {Math.round(r.health_score)}</em></span><span><b>{r.estimated_yield.toLocaleString()} kg</b></span><span className="signals-cell">{r.texture_pattern && <em className={`signal-chip texture-${r.texture_pattern}`} title={`Texture: ${r.texture_pattern}`}>{r.texture_pattern}</em>}{r.tilt_corrected && <em className="signal-chip tilt" title="Perspective corrected">⇕</em>}{r.plant_size_uniformity_score != null && <em className="signal-chip size" title={`Size uniformity: ${Math.round(r.plant_size_uniformity_score)}/100`}>⊞ {Math.round(r.plant_size_uniformity_score)}</em>}{!r.texture_pattern && !r.tilt_corrected && r.plant_size_uniformity_score == null && <small className="field-help" style={{margin: 0}}>—</small>}</span></div>)}</div>}
   </section></div>;
 }
 

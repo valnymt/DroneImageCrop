@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from app.services.report_generator import generate_report_pdf
-from app.services.schemas import AnalysisResult, Detection
+from app.services.schemas import AnalysisResult, Detection, PlantSizeStats
 
 
 def make_result(**overrides) -> AnalysisResult:
@@ -38,6 +38,31 @@ class TestGenerateReportPdf:
     def test_produces_a_valid_pdf(self, image):
         pdf_bytes = generate_report_pdf(
             image, make_result(), field_name="West Field", crop_type="Corn",
+            field_area_hectares=3.2, analysis_date="Aug 15, 2026",
+            health_label="Healthy vegetation", health_copy="Strong canopy.",
+            recommendation="Keep monitoring.",
+        )
+
+        assert pdf_bytes.startswith(b"%PDF")
+        assert len(pdf_bytes) > 1000
+
+    def test_includes_tilt_correction_and_plant_size_stats_when_present(self, image):
+        # Regression test for a real gap: these two fields (Phases R/S)
+        # were added to AnalysisResult but never wired into the PDF, so a
+        # downloaded report silently omitted them even though the Results
+        # screen showed both.
+        result = make_result(
+            tilt_corrected=True,
+            tilt_correction_note="Perspective corrected using 40 row-direction and 12 cross-direction lines.",
+            plant_size_stats=PlantSizeStats(
+                plant_count=12, mean_area_cm2=850.5, median_area_cm2=800.0,
+                min_area_cm2=400.0, max_area_cm2=1500.0, mean_aspect_ratio=1.4,
+                size_uniformity_score=72.0,
+            ),
+        )
+
+        pdf_bytes = generate_report_pdf(
+            image, result, field_name="West Field", crop_type="Corn",
             field_area_hectares=3.2, analysis_date="Aug 15, 2026",
             health_label="Healthy vegetation", health_copy="Strong canopy.",
             recommendation="Keep monitoring.",

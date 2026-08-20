@@ -8,8 +8,13 @@ Repo: `https://github.com/valnymt/DroneImageCrop.git` (remote `origin`, on branc
 
 Working tree is clean. Everything through Phase N was pushed to `origin/main`. Phase O
 (documentation-only, no code), Phase P (texture analysis), Phase Q (flight comparison), Phase R
-(perspective/tilt correction), and Phase S (per-plant size/shape stats) are committed locally,
-not yet pushed — push when the user asks for it.
+(perspective/tilt correction), Phase S (per-plant size/shape stats), and Phase T (persisting
+P/R/S to history/dashboard) are committed locally, not yet pushed — push when the user asks.
+
+**Local D1 migration applied**: `drizzle/0001_glamorous_daredevil.sql` has been run against the
+local `.wrangler` D1 state already (via `npm run db:migrate:local`). If this repo is cloned
+fresh or the local D1 state is reset, that migration needs re-running before History/Dashboard
+will show the new columns -- see Phase T below.
 
 ## How to run it
 
@@ -306,6 +311,45 @@ diverging into two code paths), 3 new pipeline-wiring tests -- 153 backend tests
 Verified end-to-end through the real `/api/analyze` endpoint against an in-distribution
 validation image (2 real plant detections, real SAM masks, real computed stats matching what
 the browser then rendered in a new "Per-plant size & shape" Results panel).
+
+## Phase T — persisted Phases P/R/S to history/dashboard (they were invisible outside one Results screen)
+
+Real gap found by inspection, not guessed at: `texture_pattern`, `tilt_corrected`, and
+`plant_size_stats` were computed by the backend on every analysis but only ever lived in the
+just-computed `Analysis` object in React state -- never sent to `/api/analyses`, so `History`
+and `Dashboard` looked identical to how they looked before Phases P/R/S existed. Walking someone
+through Dashboard -> History would show none of that work; only a single fresh Results screen
+did.
+
+`db/schema.ts` gained 6 nullable columns (`textureUniformityScore`, `texturePattern`,
+`tiltCorrected`, `plantSizeMeanAreaCm2`, `plantSizeUniformityScore`,
+`plantSizeMeanAspectRatio`) -- nullable because rows written before this migration genuinely
+don't have these, not because anything failed. Migration generated with `npm run db:generate`
+(`drizzle/0001_glamorous_daredevil.sql`) and applied to the local D1 state with
+`npm run db:migrate:local`. `app/api/analyses/route.ts` accepts and returns them;
+`runAnalysis()`'s D1 persistence call in `app/page.tsx` now sends them.
+
+**History** gained a 7th "SIGNALS" column: a texture-pattern chip (color-coded uniform/mixed/
+patchy same as Results), a "⇕" tilt-corrected chip, and a "⊞ NN" size-uniformity chip -- `—` for
+older rows that predate the migration, not a blank cell that reads as a bug.
+
+**Dashboard** gained a second stat-tile row, "AI signal coverage" (patchy-texture count, tilt-
+corrected count, average size uniformity) -- **hidden entirely** when no history row has any of
+this data yet, rather than showing a row of misleading zeros.
+
+**Also fixed while in here**: `report_generator.py` had texture in the PDF (added in Phase P)
+but never gained `plant_size_stats` (Phase S) or a tilt-correction line (Phase R) when those
+were built afterward -- genuine oversight, not by design. Fixed, with a regression test.
+
+**Also gave Compare Flights (Phase Q) real presence**: it was a working nav item with real ORB/
+homography CV behind it, but the Dashboard hero only ever advertised single-photo analysis.
+Added a hero link pointing at it directly.
+
+Verified end-to-end in the browser: ran a fresh analysis, confirmed the `POST /api/analyses`
+call succeeded (201), then confirmed History's newest row showed real signal chips
+("Mixed" · "⊞ 70") while every pre-migration row correctly showed "—", and Dashboard's new AI
+signal section appeared with the correct aggregated numbers (0/1 patchy, 0 tilt-corrected,
+70/100 avg size uniformity) matching that one real row.
 
 ## Key files
 

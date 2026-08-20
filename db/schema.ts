@@ -15,4 +15,16 @@ export const analyses = sqliteTable("analyses", {
   estimatedYield: real("estimated_yield").notNull(),
   confidenceScore: real("confidence_score").notNull(),
   imagePath: text("image_path"),
+  // Phases P/R/S -- previously computed by the backend but discarded after
+  // the Results screen closed, so History/Dashboard never showed any of
+  // it. texture fields are always present on a real analysis (not
+  // nullable in the backend response); tiltCorrected likewise. Plant size
+  // stats are genuinely absent whenever SAM wasn't available/refinement
+  // was off, so those stay nullable rather than defaulting to 0.
+  textureUniformityScore: real("texture_uniformity_score"),
+  texturePattern: text("texture_pattern"),
+  tiltCorrected: integer("tilt_corrected", { mode: "boolean" }),
+  plantSizeMeanAreaCm2: real("plant_size_mean_area_cm2"),
+  plantSizeUniformityScore: real("plant_size_uniformity_score"),
+  plantSizeMeanAspectRatio: real("plant_size_mean_aspect_ratio"),
 });

@@ -42,6 +42,15 @@ type AnalysisPayload = {
   estimated_yield?: number;
   confidence_score?: number;
   image_path?: string | null;
+  // Phases P/R/S -- optional so older-shaped callers (or a backend that's
+  // running an older build) still persist successfully; the fields the
+  // history/dashboard views actually use are just absent, not an error.
+  texture_uniformity_score?: number | null;
+  texture_pattern?: string | null;
+  tilt_corrected?: boolean | null;
+  plant_size_mean_area_cm2?: number | null;
+  plant_size_uniformity_score?: number | null;
+  plant_size_mean_aspect_ratio?: number | null;
 };
 
 const REQUIRED_NUMBER_FIELDS = [
@@ -84,6 +93,12 @@ export async function POST(request: Request) {
         estimatedYield: payload.estimated_yield!,
         confidenceScore: payload.confidence_score!,
         imagePath: payload.image_path ?? null,
+        textureUniformityScore: payload.texture_uniformity_score ?? null,
+        texturePattern: payload.texture_pattern ?? null,
+        tiltCorrected: payload.tilt_corrected ?? null,
+        plantSizeMeanAreaCm2: payload.plant_size_mean_area_cm2 ?? null,
+        plantSizeUniformityScore: payload.plant_size_uniformity_score ?? null,
+        plantSizeMeanAspectRatio: payload.plant_size_mean_aspect_ratio ?? null,
       })
       .returning();
 

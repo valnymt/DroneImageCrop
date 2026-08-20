@@ -149,6 +149,22 @@ def generate_report_pdf(
             f"Texture pattern: {result.texture_pattern} ({result.texture_uniformity_score:.0f}/100 uniformity)",
             styles["body"],
         ),
+    ]
+    if result.tilt_corrected:
+        story.append(Paragraph(f"Perspective correction: {result.tilt_correction_note}", styles["body"]))
+    if result.plant_size_stats is not None:
+        stats = result.plant_size_stats
+        story += [
+            Spacer(1, 0.08 * inch),
+            Paragraph(
+                f"Per-plant size: {stats.mean_area_cm2:,.0f} cm² mean canopy area "
+                f"({stats.min_area_cm2:,.0f}-{stats.max_area_cm2:,.0f} cm² range), "
+                f"{stats.size_uniformity_score:.0f}/100 size uniformity, "
+                f"{stats.mean_aspect_ratio:.2f}x mean elongation",
+                styles["body"],
+            ),
+        ]
+    story += [
         Spacer(1, 0.15 * inch),
         Paragraph("<b>RGB screening result</b>", styles["body"]),
         Paragraph(RGB_SCREENING_DISCLAIMER, styles["muted"]),
