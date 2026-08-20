@@ -11,12 +11,15 @@ class VegetationMetrics:
     coverage_percent: float
     vegetation_score: float
     health_score: float
+    # Per-pixel Excess Green, colormapped -- a visualization of data already
+    # computed below, not a separate model.
+    heatmap: np.ndarray
     vari_score: float = 0.0
     exgr_score: float = 0.0
 
 
 class OpenCVProcessor:
-    def load_and_preprocess(self, path: Path, max_side: int = 1600) -> np.ndarray:
+    def load_and_preprocess(self, path: Path, max_side: int = 1600, enhance: bool = True) -> np.ndarray:
         image = cv2.imread(str(path))
         if image is None:
             raise ValueError("The uploaded image could not be decoded.")
@@ -24,6 +27,8 @@ class OpenCVProcessor:
         scale = min(1.0, max_side / max(h, w))
         if scale < 1:
             image = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+        if not enhance:
+            return image
         # Bilateral filtering suppresses drone sensor noise while retaining leaf edges.
         denoised = cv2.bilateralFilter(image, 7, 45, 45)
         lab = cv2.cvtColor(denoised, cv2.COLOR_BGR2LAB)
@@ -69,11 +74,14 @@ class OpenCVProcessor:
         vari_score = min(100.0, max(0.0, vari_dominance * 100))
         exgr_score = min(100.0, exgr_dominance / 1.5)
         health = min(100.0, 0.55 * vegetation + 0.45 * coverage)
+        exg_normalized = cv2.normalize(exg, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        heatmap = cv2.applyColorMap(exg_normalized, cv2.COLORMAP_TURBO)
         return VegetationMetrics(
             mask,
             round(coverage, 2),
             round(vegetation, 2),
             round(health, 2),
+            heatmap,
             round(vari_score, 2),
             round(exgr_score, 2),
         )

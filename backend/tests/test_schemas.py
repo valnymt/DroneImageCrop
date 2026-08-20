@@ -14,6 +14,10 @@ def make_result(**overrides):
         estimated_yield=12.5,
         confidence_score=80.0,
         detections=[],
+        image_width=640,
+        image_height=480,
+        segmentation_overlay="data:image/png;base64,fake-seg",
+        heatmap_overlay="data:image/png;base64,fake-heat",
     )
     base.update(overrides)
     return AnalysisResult(**base)
@@ -33,6 +37,11 @@ class TestAnalysisResult:
     def test_nonnegative_fields_reject_negative_values(self, field):
         with pytest.raises(ValidationError):
             make_result(**{field: -1})
+
+    @pytest.mark.parametrize("field", ["image_width", "image_height"])
+    def test_image_dimensions_reject_nonpositive_values(self, field):
+        with pytest.raises(ValidationError):
+            make_result(**{field: 0})
 
     def test_detections_default_to_a_list(self):
         detection = Detection(x1=1.0, y1=2.0, x2=30.0, y2=40.0, confidence=0.92, label="crop")

@@ -1,17 +1,29 @@
+import re
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
 import cv2
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+import numpy as np
+from fastapi import APIRouter, File, Form, HTTPException, Response, UploadFile
+from pydantic import ValidationError
 
 from app.services.crop_classifier import CropClassifier
 from app.services.field_area_estimator import estimate_area_hectares
 from app.services.pipeline import CropAnalysisPipeline
+from app.services.report_generator import generate_report_pdf
 from app.services.schemas import AnalysisResult, InspectResult
 
 router = APIRouter(tags=["analysis"])
 pipeline = CropAnalysisPipeline()
 classifier = CropClassifier()
+
+
+def _safe_pdf_filename(field_name: str, analysis_date: str) -> str:
+    # field_name/analysis_date are free-text user input that ends up in an
+    # HTTP response header -- restrict to a safe character set rather than
+    # passing them through directly, so nothing can inject header syntax.
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", f"{field_name}-{analysis_date}").strip("-")
+    return f"{slug or 'agrisight-report'}.pdf"
 
 
 @router.post("/analyze", response_model=AnalysisResult)
@@ -20,6 +32,9 @@ async def analyze(
     crop_type: str = Form(...),
     field_size_hectares: float = Form(..., gt=0),
     average_yield_per_plant_kg: float = Form(0.5, gt=0),
+    enhance: bool = Form(True),
+    refine_segmentation: bool = Form(True),
+    conf_threshold: float = Form(0.25, ge=0, le=1),
 ) -> AnalysisResult:
     if image.content_type not in {"image/jpeg", "image/png"}:
         raise HTTPException(415, "Only JPG and PNG images are supported.")
@@ -29,7 +44,8 @@ async def analyze(
         path = Path(tmp.name)
     try:
         return pipeline.analyze(
-            path, crop_type, field_size_hectares, average_yield_per_plant_kg
+            path, crop_type, field_size_hectares, average_yield_per_plant_kg,
+            enhance=enhance, refine_segmentation=refine_segmentation, conf_threshold=conf_threshold,
         )
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
@@ -62,3 +78,42 @@ async def inspect(image: UploadFile = File(...)) -> InspectResult:
         )
     finally:
         path.unlink(missing_ok=True)
+
+
+@router.post("/report")
+async def report(
+    image: UploadFile = File(...),
+    result: str = Form(...),
+    field_name: str = Form(...),
+    crop_type: str = Form(...),
+    field_area_hectares: float = Form(..., gt=0),
+    analysis_date: str = Form(...),
+    health_label: str = Form(...),
+    health_copy: str = Form(...),
+    recommendation: str = Form(...),
+) -> Response:
+    """Regenerates a PDF from an already-completed analysis -- takes the
+    same image plus the AnalysisResult the frontend already has, rather
+    than re-running the CV pipeline."""
+    if image.content_type not in {"image/jpeg", "image/png"}:
+        raise HTTPException(415, "Only JPG and PNG images are supported.")
+    try:
+        analysis_result = AnalysisResult.model_validate_json(result)
+    except ValidationError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+    image_bytes = await image.read()
+    np_image = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
+    if np_image is None:
+        raise HTTPException(422, "The uploaded image could not be decoded.")
+
+    pdf_bytes = generate_report_pdf(
+        np_image, analysis_result, field_name, crop_type, field_area_hectares,
+        analysis_date, health_label, health_copy, recommendation,
+    )
+    filename = _safe_pdf_filename(field_name, analysis_date)
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

@@ -24,6 +24,10 @@ FAKE_RESULT = AnalysisResult(
     estimated_yield=30.2,
     confidence_score=88.0,
     detections=[],
+    image_width=640,
+    image_height=480,
+    segmentation_overlay="data:image/png;base64,fake-seg",
+    heatmap_overlay="data:image/png;base64,fake-heat",
 )
 
 VALID_FORM = {"crop_type": "Wheat", "field_size_hectares": "2", "average_yield_per_plant_kg": "0.02"}
@@ -104,6 +108,38 @@ def test_analyze_passes_form_fields_through_to_pipeline(mock_pipeline):
     assert average_yield_per_plant_kg == 0.18
 
 
+@patch("app.api.analysis.pipeline")
+def test_analyze_passes_settings_through_to_pipeline(mock_pipeline):
+    mock_pipeline.analyze.return_value = FAKE_RESULT
+
+    client.post(
+        "/api/analyze",
+        files={"image": ("test.jpg", b"fake-bytes", "image/jpeg")},
+        data={**VALID_FORM, "enhance": "false", "refine_segmentation": "false", "conf_threshold": "0.4"},
+    )
+
+    _, kwargs = mock_pipeline.analyze.call_args
+    assert kwargs["enhance"] is False
+    assert kwargs["refine_segmentation"] is False
+    assert kwargs["conf_threshold"] == 0.4
+
+
+@patch("app.api.analysis.pipeline")
+def test_analyze_settings_default_to_current_behavior(mock_pipeline):
+    mock_pipeline.analyze.return_value = FAKE_RESULT
+
+    client.post(
+        "/api/analyze",
+        files={"image": ("test.jpg", b"fake-bytes", "image/jpeg")},
+        data=VALID_FORM,
+    )
+
+    _, kwargs = mock_pipeline.analyze.call_args
+    assert kwargs["enhance"] is True
+    assert kwargs["refine_segmentation"] is True
+    assert kwargs["conf_threshold"] == 0.25
+
+
 # /inspect (crop-type + area suggestions) -- CLIP and the area estimator are
 # mocked below for the same reason: these tests exercise the API contract,
 # not the model or the EXIF math (see test_field_area_estimator.py for that).
@@ -162,3 +198,91 @@ def test_inspect_rejects_undecodable_image(mock_classifier, _mock_estimate_area)
     )
     assert response.status_code == 422
     mock_classifier.classify.assert_not_called()
+
+
+# /report (PDF export) -- generate_report_pdf is mocked below for the same
+# reason: these exercise the API contract, not PDF rendering (see
+# test_report_generator.py for that).
+
+REPORT_FORM = {
+    "result": FAKE_RESULT.model_dump_json(),
+    "field_name": "West Field",
+    "crop_type": "Wheat",
+    "field_area_hectares": "2",
+    "analysis_date": "Aug 15, 2026",
+    "health_label": "Healthy vegetation",
+    "health_copy": "Strong canopy.",
+    "recommendation": "Keep monitoring.",
+}
+
+
+def test_report_rejects_unsupported_content_type():
+    response = client.post(
+        "/api/report",
+        files={"image": ("test.txt", b"not an image", "text/plain")},
+        data=REPORT_FORM,
+    )
+    assert response.status_code == 415
+
+
+def test_report_rejects_malformed_result_json():
+    response = client.post(
+        "/api/report",
+        files={"image": ("test.jpg", real_jpeg_bytes(), "image/jpeg")},
+        data={**REPORT_FORM, "result": "not json"},
+    )
+    assert response.status_code == 422
+
+
+def test_report_rejects_undecodable_image():
+    response = client.post(
+        "/api/report",
+        files={"image": ("test.jpg", b"not-a-real-jpeg", "image/jpeg")},
+        data=REPORT_FORM,
+    )
+    assert response.status_code == 422
+
+
+@patch("app.api.analysis.generate_report_pdf")
+def test_report_returns_pdf_with_safe_filename(mock_generate):
+    mock_generate.return_value = b"%PDF-fake-bytes"
+
+    response = client.post(
+        "/api/report",
+        files={"image": ("test.jpg", real_jpeg_bytes(), "image/jpeg")},
+        data={**REPORT_FORM, "field_name": 'West "Field" / Plot #2'},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/pdf"
+    assert response.content == b"%PDF-fake-bytes"
+    disposition = response.headers["content-disposition"]
+    filename = disposition.split('filename="', 1)[1].rsplit('"', 1)[0]
+    # The raw field_name has quotes and a slash -- confirms _safe_pdf_filename
+    # actually stripped them rather than passing user input straight into
+    # the header (a header-injection / malformed-header risk otherwise).
+    assert '"' not in filename
+    assert "/" not in filename
+    assert filename.endswith(".pdf")
+    assert "West" in filename and "Field" in filename and "Plot" in filename
+
+
+@patch("app.api.analysis.generate_report_pdf")
+def test_report_passes_parsed_result_through(mock_generate):
+    mock_generate.return_value = b"%PDF-fake-bytes"
+
+    client.post(
+        "/api/report",
+        files={"image": ("test.jpg", real_jpeg_bytes(), "image/jpeg")},
+        data=REPORT_FORM,
+    )
+
+    args, _ = mock_generate.call_args
+    _, analysis_result, field_name, crop_type, field_area_hectares, analysis_date, health_label, health_copy, recommendation = args
+    assert analysis_result.plant_count == FAKE_RESULT.plant_count
+    assert field_name == "West Field"
+    assert crop_type == "Wheat"
+    assert field_area_hectares == 2.0
+    assert analysis_date == "Aug 15, 2026"
+    assert health_label == "Healthy vegetation"
+    assert recommendation == "Keep monitoring."

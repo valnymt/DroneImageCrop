@@ -65,6 +65,18 @@ class TestVegetationMetrics:
         assert metrics.green_mask.shape == (64, 64)
         assert metrics.green_mask.dtype == np.uint8
 
+    def test_heatmap_is_a_colormapped_image_matching_dimensions(self, processor):
+        image = two_tone_bgr(GREEN_BGR, SOIL_BGR, size=64)
+        metrics = processor.vegetation_metrics(image)
+        assert metrics.heatmap.shape == (64, 64, 3)
+        assert metrics.heatmap.dtype == np.uint8
+        # The green half and the soil half carry a different Excess Green
+        # signal, so the colormap must actually distinguish them, not just
+        # apply a flat color to the whole image.
+        left_half = metrics.heatmap[:, :32]
+        right_half = metrics.heatmap[:, 32:]
+        assert not np.array_equal(left_half, right_half)
+
     def test_majority_vote_rejects_index_disagreement(self, processor, monkeypatch):
         # If only one of the three indices would call a region vegetation,
         # the 2-of-3 majority vote should reject it -- this is the whole
@@ -105,3 +117,22 @@ class TestLoadAndPreprocess:
         result = processor.load_and_preprocess(path, max_side=800)
 
         assert result.shape[:2] == (100, 150)
+
+    def test_enhance_false_skips_denoising_and_contrast(self, processor, tmp_path):
+        image = patch_bgr(SOIL_BGR, GREEN_BGR, size=64)
+        path = tmp_path / "img.jpg"
+        cv2.imwrite(str(path), image)
+
+        raw = processor.load_and_preprocess(path, enhance=False)
+        enhanced = processor.load_and_preprocess(path, enhance=True)
+
+        assert not np.array_equal(raw, enhanced)
+
+    def test_enhance_false_still_resizes(self, processor, tmp_path):
+        large = np.full((1200, 2000, 3), GREEN_BGR, dtype=np.uint8)
+        path = tmp_path / "large.jpg"
+        cv2.imwrite(str(path), large)
+
+        result = processor.load_and_preprocess(path, max_side=800, enhance=False)
+
+        assert max(result.shape[:2]) <= 800
