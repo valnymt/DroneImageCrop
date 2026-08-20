@@ -439,7 +439,7 @@ export default function Home() {
 
         {view === "dashboard" && <Dashboard records={records} totals={totals} onAnalyze={() => setView("analyze")} onHistory={() => setView("history")} />}
         {view === "analyze" && <Upload file={file} preview={preview} fieldName={fieldName} crop={crop} area={area} analyzing={analyzing} error={analyzeError} inspecting={inspecting} cropSuggested={cropSuggested} areaSuggested={areaSuggested} areaSource={areaSource} manualAltitude={manualAltitude} setManualAltitude={setManualAltitude} onEstimateAltitude={estimateWithManualAltitude} areaUnit={settings.areaUnit} inputRef={inputRef} onFile={chooseFile} setFieldName={setFieldName} run={runAnalysis} />}
-        {view === "results" && latest && <Results data={latest} file={file} areaUnit={settings.areaUnit} onNew={() => setView("analyze")} />}
+        {view === "results" && latest && <Results data={latest} file={file} areaUnit={settings.areaUnit} onNew={() => setView("analyze")} onAdjust={(patch) => setLatest((prev) => prev ? { ...prev, ...patch } : prev)} />}
         {view === "history" && <History records={records} loading={historyLoading} error={historyError} onRetry={fetchHistory} areaUnit={settings.areaUnit} />}
         {view === "settings" && <Settings settings={settings} onSave={saveSettings} />}
       </section>
@@ -524,6 +524,9 @@ const AREA_SOURCE_INFO: Record<string, { label: string; tier: "high" | "medium" 
   manual_altitude: { label: "calculated from the altitude you entered", tier: "high" },
   manual_altitude_default_focal: { label: "calculated from your altitude (assumed lens)", tier: "medium" },
   row_spacing_estimate: { label: "estimated from visible crop-row spacing in the photo", tier: "medium" },
+  // Not a real area_source from the backend -- set locally when the user
+  // corrects the AI's guess via the Results "Adjust" panel (Phase N).
+  manual_override: { label: "manually corrected by you", tier: "high" },
 };
 
 function confidenceTier(confidence: number | null): "high" | "medium" | "low" {
@@ -533,13 +536,63 @@ function confidenceTier(confidence: number | null): "high" | "medium" | "low" {
   return "low";
 }
 
-function Results({ data, file, areaUnit, onNew }: { data: Analysis; file: File | null; areaUnit: "ha" | "acres"; onNew: () => void }) {
+type ResultsPatch = Pick<Analysis, "crop" | "fieldAreaHectares" | "crop_density" | "estimated_yield" | "average_yield_per_plant_kg" | "cropConfidence" | "areaSource">;
+
+function Results({ data, file, areaUnit, onNew, onAdjust }: { data: Analysis; file: File | null; areaUnit: "ha" | "acres"; onNew: () => void; onAdjust: (patch: ResultsPatch) => void }) {
   const cropTier = confidenceTier(data.cropConfidence);
   const areaInfo = data.areaSource ? AREA_SOURCE_INFO[data.areaSource] : undefined;
   // No entry in AREA_SOURCE_INFO means "unavailable" (or inspection never
   // completed) -- area is a plain default, never measured from this photo.
   const areaTier = areaInfo?.tier ?? "low";
   const areaLabel = areaInfo?.label ?? "not measured from this photo — default estimate";
+  const [adjustOpen, setAdjustOpen] = useState(false);
+  const [draftCrop, setDraftCrop] = useState(data.crop);
+  const [draftArea, setDraftArea] = useState(String(data.fieldAreaHectares));
+  const [adjusting, setAdjusting] = useState(false);
+  const [adjustError, setAdjustError] = useState<string | null>(null);
+
+  function openAdjust() {
+    setDraftCrop(data.crop);
+    setDraftArea(String(data.fieldAreaHectares));
+    setAdjustError(null);
+    setAdjustOpen(true);
+  }
+
+  async function saveAdjust() {
+    const areaHa = Number(draftArea);
+    if (!draftCrop || !areaHa || areaHa <= 0) return;
+    setAdjusting(true);
+    setAdjustError(null);
+    try {
+      const formData = new FormData();
+      formData.append("plant_count", String(data.plant_count));
+      formData.append("crop_type", draftCrop);
+      formData.append("field_size_hectares", String(areaHa));
+      formData.append("coverage", String(data.crop_coverage));
+      formData.append("health", String(data.health_score));
+      const res = await fetch(`${API_BASE}/api/recompute`, { method: "POST", body: formData });
+      if (!res.ok) throw new Error(await parseError(res, `Recalculation failed (${res.status}).`));
+      const result: { crop_density: number; estimated_yield: number; average_yield_per_plant_kg: number } = await res.json();
+      onAdjust({
+        crop: draftCrop,
+        fieldAreaHectares: areaHa,
+        crop_density: result.crop_density,
+        estimated_yield: result.estimated_yield,
+        average_yield_per_plant_kg: result.average_yield_per_plant_kg,
+        // A user-entered correction is ground truth as far as this app is
+        // concerned -- shown at full confidence rather than re-running
+        // CLIP/area estimation, which weren't wrong about this photo, the
+        // user just knows better.
+        cropConfidence: 100,
+        areaSource: "manual_override",
+      });
+      setAdjustOpen(false);
+    } catch (err) {
+      setAdjustError(err instanceof TypeError ? NETWORK_ERROR : err instanceof Error ? err.message : "Recalculation failed.");
+    } finally {
+      setAdjusting(false);
+    }
+  }
   const densityValue = areaUnit === "acres" ? data.crop_density / ACRES_PER_HA : data.crop_density;
   const densityLabel = areaUnit === "acres" ? "plants / acre" : "plants / hectare";
   const [exporting, setExporting] = useState(false);
@@ -641,6 +694,20 @@ function Results({ data, file, areaUnit, onNew }: { data: Analysis; file: File |
         <span><b>Field area: {data.fieldAreaHectares.toLocaleString(undefined, {maximumFractionDigits: 2})} ha</b><small>{areaLabel}</small></span>
       </div>
     </div>
+    {!adjustOpen && <button type="button" className="adjust-link" onClick={openAdjust}>Not sure this is right? Adjust crop type or area →</button>}
+    {adjustOpen && <div className="adjust-panel">
+      <b>Correct the AI's guess</b>
+      <span>Only crop density and estimated yield are recalculated — detection, coverage, and health scores come from the image itself and don't change.</span>
+      <div className="adjust-row">
+        <label>CROP TYPE<select value={draftCrop} onChange={(e) => setDraftCrop(e.target.value)}>{SUPPORTED_CROPS.map((c) => <option key={c}>{c}</option>)}</select></label>
+        <label>FIELD AREA (HA)<input type="number" min=".01" step=".01" value={draftArea} onChange={(e) => setDraftArea(e.target.value)} /></label>
+      </div>
+      {adjustError && <div className="tech-note error-note"><b>⚠ Recalculation failed</b><span>{adjustError}</span></div>}
+      <div className="adjust-actions">
+        <button type="button" className="ghost" onClick={() => setAdjustOpen(false)} disabled={adjusting}>Cancel</button>
+        <button type="button" className="primary compact" onClick={saveAdjust} disabled={adjusting || !draftCrop || Number(draftArea) <= 0}>{adjusting ? <><span className="spinner" /> Recalculating…</> : "Save correction"}</button>
+      </div>
+    </div>}
     <section className="result-metrics">{[["PLANT COUNT", data.plant_count.toLocaleString(), "detected plants"], ["CROP DENSITY", densityValue.toLocaleString(undefined, {maximumFractionDigits: 2}), densityLabel], ["CROP COVERAGE", `${data.crop_coverage}%`, "segmented area"], ["HEALTH SCORE", `${Math.round(data.health_score)}/100`, "strong vegetation"], ["EST. HARVEST", `${data.estimated_yield.toLocaleString()} kg`, `${(data.estimated_yield / 1000).toFixed(2)} metric tons`]].map(([a,b,c]) => <article key={a}><small>{a}</small><b>{b}</b><span>{c}</span></article>)}</section>
     <section className="vision-grid"><article className="panel vision-panel"><div className="panel-head"><div><h3>Computer vision output</h3><p>Detection and segmentation layers</p></div><div className="seg-tabs"><button className={tab === "detection" ? "selected" : ""} onClick={() => setTab("detection")}>Detection</button><button className={tab === "segmentation" ? "selected" : ""} onClick={() => setTab("segmentation")}>Segmentation</button><button className={tab === "heatmap" ? "selected" : ""} onClick={() => setTab("heatmap")}>Heatmap</button></div></div><div className="result-image" ref={imageContainerRef}>{tab === "detection" && data.image && <img src={data.image} alt="Analyzed crop field" />}{tab === "segmentation" && <img src={data.segmentation_overlay} alt="Segmentation mask overlay" />}{tab === "heatmap" && <img src={data.heatmap_overlay} alt="Vegetation density heatmap" />}{tab === "detection" && transform && data.detections.map((d, i) => <span key={i} className="bbox" style={{ left: d.x1 * transform.scaleX - transform.offsetX, top: d.y1 * transform.scaleY - transform.offsetY, width: (d.x2 - d.x1) * transform.scaleX, height: (d.y2 - d.y1) * transform.scaleY }}>{showBoxLabels ? `${d.label} .${Math.round(d.confidence * 100)}` : ""}</span>)}{tab === "detection" && <div className="model-badge">YOLO DETECTIONS · {data.plant_count.toLocaleString()}</div>}</div></article>
     <article className={`panel insights health-${data.health_score >= 80 ? "good" : data.health_score >= 55 ? "mixed" : "poor"}`}><h3>Field intelligence</h3><p>Interpreted from visible RGB vegetation signals.</p><div className="score"><div className="score-ring" style={{"--score": `${data.health_score * 3.6}deg`} as React.CSSProperties}><span><b>{Math.round(data.health_score)}</b><small>/ 100</small></span></div><div><b>{healthLabel}</b><p>{healthCopy}</p></div></div><hr /><div className="insight-row"><span>GREEN VEGETATION RATIO</span><b>{data.vegetation_score.toFixed(1)}%</b></div><div className="bar"><i style={{width: `${data.vegetation_score}%`}} /></div><div className="insight-row"><span>AVG. DETECTION CONFIDENCE</span><b>{data.confidence_score.toFixed(1)}%</b></div><div className="bar"><i style={{width: `${data.confidence_score}%`}} /></div><div className="method-warning"><b>RGB screening result</b><span>Color analysis can flag suspicious areas, but cannot distinguish disease from drought, mature crops, harvest residue, shadows, or soil without field context.</span></div><div className="recommend"><b>Recommendation</b><p>{recommendation}</p></div></article></section>

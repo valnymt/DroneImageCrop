@@ -245,6 +245,54 @@ def test_inspect_rejects_undecodable_image(mock_classifier, _mock_estimate_area)
     mock_classifier.classify.assert_not_called()
 
 
+# /recompute (Results-screen crop/area override, Phase N) -- no image, no
+# CV pipeline involved, so nothing here is mocked; it's real YieldEstimator
+# math end-to-end through the HTTP layer.
+
+RECOMPUTE_FORM = {
+    "plant_count": "100", "crop_type": "Corn", "field_size_hectares": "2",
+    "coverage": "80", "health": "70",
+}
+
+
+def test_recompute_returns_density_and_yield():
+    response = client.post("/api/recompute", data=RECOMPUTE_FORM)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["crop_density"] == 50.0
+    assert body["average_yield_per_plant_kg"] == 0.18
+    condition_factor = 0.65 + 0.35 * ((80 + 70) / 200)
+    assert body["estimated_yield"] == round(100 * 0.18 * condition_factor, 2)
+
+
+def test_recompute_uses_corrected_crop_and_area():
+    # Same plant_count/coverage/health as RECOMPUTE_FORM, but a different
+    # crop (different baseline kg/plant) and a smaller area (higher
+    # density) -- confirms both actually change the result, not just the
+    # crop-density-only path.
+    response = client.post(
+        "/api/recompute",
+        data={**RECOMPUTE_FORM, "crop_type": "Tomato", "field_size_hectares": "1"},
+    )
+
+    body = response.json()
+    assert body["crop_density"] == 100.0
+    assert body["average_yield_per_plant_kg"] == 3.0
+
+
+def test_recompute_accepts_explicit_yield_override():
+    response = client.post("/api/recompute", data={**RECOMPUTE_FORM, "average_yield_per_plant_kg": "0.5"})
+
+    assert response.json()["average_yield_per_plant_kg"] == 0.5
+
+
+def test_recompute_rejects_zero_area():
+    response = client.post("/api/recompute", data={**RECOMPUTE_FORM, "field_size_hectares": "0"})
+
+    assert response.status_code == 422
+
+
 # /report (PDF export) -- generate_report_pdf is mocked below for the same
 # reason: these exercise the API contract, not PDF rendering (see
 # test_report_generator.py for that).

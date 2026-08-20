@@ -37,6 +37,18 @@ class AnalysisResult(BaseModel):
     heatmap_overlay: str
 
 
+class RecomputeResult(BaseModel):
+    """Response for POST /api/recompute -- crop_density and estimated_yield
+    recalculated for a corrected crop type and/or field area, without
+    re-running the CV pipeline (plant_count, coverage, and health don't
+    change just because the user corrected a wrong AI guess about crop
+    type or area; only the two values derived from them do)."""
+
+    crop_density: float = Field(ge=0)
+    estimated_yield: float = Field(ge=0)
+    average_yield_per_plant_kg: float = Field(ge=0)
+
+
 class InspectResult(BaseModel):
     """Best-effort, low-confidence suggestions for pre-filling the analyze
     form -- never authoritative. crop_type comes from zero-shot CLIP

@@ -11,7 +11,7 @@ from app.services.crop_classifier import CropClassifier
 from app.services.field_area_estimator import estimate_area_hectares
 from app.services.pipeline import CropAnalysisPipeline
 from app.services.report_generator import generate_report_pdf
-from app.services.schemas import AnalysisResult, InspectResult
+from app.services.schemas import AnalysisResult, InspectResult, RecomputeResult
 
 router = APIRouter(tags=["analysis"])
 pipeline = CropAnalysisPipeline()
@@ -89,6 +89,33 @@ async def inspect(
         )
     finally:
         path.unlink(missing_ok=True)
+
+
+@router.post("/recompute", response_model=RecomputeResult)
+async def recompute(
+    plant_count: int = Form(..., ge=0),
+    crop_type: str = Form(...),
+    field_size_hectares: float = Form(..., gt=0),
+    coverage: float = Form(..., ge=0, le=100),
+    health: float = Form(..., ge=0, le=100),
+    average_yield_per_plant_kg: float | None = Form(None, gt=0),
+) -> RecomputeResult:
+    """Recalculates crop_density and estimated_yield for a corrected crop
+    type and/or field area (Phase N's Results-screen override) -- takes no
+    image and never touches YOLO/SAM/OpenCV, since plant_count, coverage,
+    and health are exactly what they were when /analyze ran; only the crop
+    label and area changed. Keeps YieldEstimator's per-crop baseline as the
+    single source of truth instead of duplicating it in the frontend.
+    """
+    per_plant_kg = pipeline.yield_estimator.resolve_per_plant_kg(crop_type, average_yield_per_plant_kg)
+    estimated_yield = pipeline.yield_estimator.estimate(
+        plant_count, crop_type, coverage, health, average_yield_per_plant_kg
+    )
+    return RecomputeResult(
+        crop_density=round(plant_count / field_size_hectares, 2),
+        estimated_yield=estimated_yield,
+        average_yield_per_plant_kg=round(per_plant_kg, 3),
+    )
 
 
 @router.post("/report")
