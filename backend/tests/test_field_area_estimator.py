@@ -1,8 +1,16 @@
 from pathlib import Path
 
+import numpy as np
+import pytest
 from PIL import ExifTags, Image
 
-from app.services.field_area_estimator import SENSOR_WIDTH_35MM_MM, estimate_area_hectares
+from app.services.field_area_estimator import (
+    DEFAULT_FOCAL_LENGTH_35MM_MM,
+    ROW_SPACING_METERS,
+    SENSOR_WIDTH_35MM_MM,
+    estimate_area_from_row_spacing,
+    estimate_area_hectares,
+)
 
 WIDTH_PX, HEIGHT_PX = 4000, 3000
 
@@ -49,6 +57,23 @@ def _save_with_xmp(path: Path, altitude: float, focal_length_35mm: float) -> Non
         image.save(path, format="JPEG", exif=exif, xmp=_xmp_packet(altitude))
 
 
+def _striped_field_array(period_px: int = 40, width_px: int = 480, height_px: int = 360):
+    """A synthetic aerial-looking field: vertical green crop rows on brown
+    soil, spaced exactly `period_px` apart -- gives the row-spacing
+    heuristic an unambiguous, known-ground-truth pattern to detect."""
+    image = np.zeros((height_px, width_px, 3), dtype=np.uint8)
+    image[:, :] = (90, 110, 140)  # bare soil, BGR
+    for x in range(0, width_px, period_px):
+        row_width = max(2, period_px // 3)
+        image[:, x : x + row_width] = (60, 170, 70)  # crop row, BGR (green-dominant)
+    return image, period_px, width_px, height_px
+
+
+def _striped_field_image() -> Image.Image:
+    image_bgr, *_ = _striped_field_array()
+    return Image.fromarray(image_bgr[:, :, ::-1])  # BGR -> RGB for PIL
+
+
 class TestEstimateAreaHectares:
     def test_matches_documented_gsd_formula_via_exif_gps_altitude(self, tmp_path):
         path = tmp_path / "drone.jpg"
@@ -88,17 +113,52 @@ class TestEstimateAreaHectares:
 
         assert estimate_area_hectares(path) == (None, "unavailable")
 
-    def test_altitude_without_focal_length_returns_unavailable(self, tmp_path):
+    def test_altitude_without_focal_length_uses_default_focal_length(self, tmp_path):
         path = tmp_path / "no_focal.jpg"
         _save_with_gps(path, altitude=100.0, focal_length_35mm=None)
 
-        assert estimate_area_hectares(path) == (None, "unavailable")
+        area, source = estimate_area_hectares(path)
 
-    def test_focal_length_without_altitude_returns_unavailable(self, tmp_path):
+        assert area == _expected_area_hectares(100.0, DEFAULT_FOCAL_LENGTH_35MM_MM)
+        assert source == "exif_gps_altitude_default_focal"
+
+    def test_focal_length_without_altitude_falls_through_to_row_spacing(self, tmp_path):
+        # The blank test fixture has no row structure to detect, so with no
+        # altitude anywhere this correctly bottoms out at "unavailable" --
+        # it should NOT be confused with the row-spacing fallback itself,
+        # which is tested directly below.
         path = tmp_path / "no_altitude.jpg"
         _save_with_gps(path, altitude=None, focal_length_35mm=24)
 
         assert estimate_area_hectares(path) == (None, "unavailable")
+
+    def test_manual_altitude_used_when_no_metadata_present(self, tmp_path):
+        path = tmp_path / "no_metadata.jpg"
+        with _blank_image() as image:
+            image.save(path, format="JPEG")
+
+        area, source = estimate_area_hectares(path, manual_altitude_m=50.0)
+
+        assert area == _expected_area_hectares(50.0, DEFAULT_FOCAL_LENGTH_35MM_MM, WIDTH_PX, HEIGHT_PX)
+        assert source == "manual_altitude_default_focal"
+
+    def test_manual_altitude_combined_with_real_focal_length(self, tmp_path):
+        path = tmp_path / "focal_only.jpg"
+        _save_with_gps(path, altitude=None, focal_length_35mm=24)
+
+        area, source = estimate_area_hectares(path, manual_altitude_m=60.0)
+
+        assert area == _expected_area_hectares(60.0, 24)
+        assert source == "manual_altitude"
+
+    def test_exif_altitude_still_takes_priority_over_manual_altitude(self, tmp_path):
+        path = tmp_path / "has_gps.jpg"
+        _save_with_gps(path, altitude=120.5, focal_length_35mm=24)
+
+        area, source = estimate_area_hectares(path, manual_altitude_m=999.0)
+
+        assert area == _expected_area_hectares(120.5, 24)
+        assert source == "exif_gps_altitude"
 
     def test_zero_altitude_returns_unavailable(self, tmp_path):
         # GPSAltitude=0 is present-but-falsy -- must be treated as "no usable
@@ -116,3 +176,87 @@ class TestEstimateAreaHectares:
 
     def test_missing_file_returns_unavailable(self, tmp_path):
         assert estimate_area_hectares(tmp_path / "does_not_exist.jpg") == (None, "unavailable")
+
+    def test_falls_back_to_row_spacing_when_no_altitude_but_rows_visible(self, tmp_path):
+        path = tmp_path / "rows_no_metadata.jpg"
+        _striped_field_image().save(str(path), quality=95)
+
+        area, source = estimate_area_hectares(path, crop_type="Corn")
+
+        assert source == "row_spacing_estimate"
+        assert area is not None and area > 0
+
+
+class TestEstimateAreaFromRowSpacing:
+    def test_detects_known_row_spacing_from_synthetic_stripes(self):
+        image_bgr, period_px, width_px, height_px = _striped_field_array(period_px=40)
+
+        area, source = estimate_area_from_row_spacing(image_bgr, "Corn")
+
+        assert source == "row_spacing_estimate"
+        expected_gsd = ROW_SPACING_METERS["Corn"] / period_px
+        expected_area = round((expected_gsd * width_px) * (expected_gsd * height_px) / 10000, 3)
+        # The detected lag is only ever exact to within a pixel or two, so
+        # the resulting area is compared with tolerance rather than exactly.
+        assert area == pytest.approx(expected_area, rel=0.15)
+
+    def test_unknown_crop_type_uses_default_row_spacing(self):
+        image_bgr, period_px, width_px, height_px = _striped_field_array(period_px=40)
+
+        area, _ = estimate_area_from_row_spacing(image_bgr, "SomeUnknownCrop")
+
+        expected_gsd = ROW_SPACING_METERS["_default"] / period_px
+        expected_area = round((expected_gsd * width_px) * (expected_gsd * height_px) / 10000, 3)
+        assert area == pytest.approx(expected_area, rel=0.15)
+
+    def test_uniform_field_with_no_row_structure_returns_unavailable(self):
+        # Solid green, no periodicity anywhere -- must not fabricate a
+        # spacing out of noise.
+        image_bgr = np.full((300, 400, 3), (60, 150, 60), dtype=np.uint8)
+
+        area, source = estimate_area_from_row_spacing(image_bgr, "Corn")
+
+        assert (area, source) == (None, "unavailable")
+
+    def test_bare_soil_with_no_vegetation_returns_unavailable(self):
+        image_bgr = np.full((300, 400, 3), (90, 110, 140), dtype=np.uint8)  # brown, BGR
+
+        area, source = estimate_area_from_row_spacing(image_bgr, "Corn")
+
+        assert (area, source) == (None, "unavailable")
+
+    def test_single_vegetation_blob_does_not_false_positive_as_rows(self):
+        # Regression test: a single smooth patch of vegetation (no
+        # repetition at all) reliably produced ONE strong-looking FFT peak
+        # in an earlier version of this heuristic -- a real photo of grass
+        # was misread as "row_spacing_estimate" with an absurd 0.001 ha
+        # result. A lone blob must never pass the row-detection heuristic;
+        # only genuine repetition (checked in the tests above) should.
+        height_px, width_px = 300, 400
+        yy, xx = np.mgrid[0:height_px, 0:width_px]
+        cy, cx = height_px / 2, width_px / 2
+        dist = np.sqrt((yy - cy) ** 2 + (xx - cx) ** 2)
+        falloff = np.clip(1 - dist / dist.max(), 0, 1)
+        image_bgr = np.zeros((height_px, width_px, 3), dtype=np.uint8)
+        image_bgr[:, :, 0] = 60  # constant blue/red so only green varies with the blob
+        image_bgr[:, :, 2] = 60
+        image_bgr[:, :, 1] = (80 + falloff * 140).astype(np.uint8)  # green channel: soft central blob
+
+        area, source = estimate_area_from_row_spacing(image_bgr, "Corn")
+
+        assert (area, source) == (None, "unavailable")
+
+    def test_smooth_illumination_gradient_does_not_false_positive_as_rows(self):
+        # A left-to-right brightness gradient (vignetting, low sun angle)
+        # has no row structure either -- linear detrending in
+        # _dominant_periodicity_px exists specifically to reject this.
+        height_px, width_px = 300, 400
+        gradient = np.linspace(40, 220, width_px, dtype=np.uint8)
+        image_bgr = np.zeros((height_px, width_px, 3), dtype=np.uint8)
+        image_bgr[:, :, 0] = 60
+        image_bgr[:, :, 2] = 60
+        image_bgr[:, :, 1] = np.tile(gradient, (height_px, 1))
+
+        area, source = estimate_area_from_row_spacing(image_bgr, "Corn")
+
+        assert (area, source) == (None, "unavailable")

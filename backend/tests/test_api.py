@@ -189,6 +189,29 @@ def test_inspect_area_is_null_without_metadata(mock_classifier, mock_estimate_ar
     assert body["area_source"] == "unavailable"
 
 
+@patch("app.api.analysis.estimate_area_hectares")
+@patch("app.api.analysis.classifier")
+def test_inspect_forwards_classified_crop_and_manual_altitude_to_area_estimator(mock_classifier, mock_estimate_area):
+    # manual_altitude_m is the last-resort field the frontend only shows
+    # after a first call comes back "unavailable" -- confirms it actually
+    # reaches the estimator (as does the classifier's own crop guess, which
+    # the row-spacing fallback needs to pick a realistic row spacing).
+    mock_classifier.classify.return_value = ("Corn", 0.8)
+    mock_estimate_area.return_value = (3.1, "manual_altitude")
+
+    response = client.post(
+        "/api/inspect",
+        files={"image": ("test.jpg", real_jpeg_bytes(), "image/jpeg")},
+        data={"manual_altitude_m": "75.0"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["area_source"] == "manual_altitude"
+    args, _ = mock_estimate_area.call_args
+    assert args[1] == "Corn"
+    assert args[2] == 75.0
+
+
 @patch("app.api.analysis.estimate_area_hectares", return_value=(None, "unavailable"))
 @patch("app.api.analysis.classifier")
 def test_inspect_rejects_undecodable_image(mock_classifier, _mock_estimate_area):

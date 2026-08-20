@@ -54,10 +54,18 @@ async def analyze(
 
 
 @router.post("/inspect", response_model=InspectResult)
-async def inspect(image: UploadFile = File(...)) -> InspectResult:
+async def inspect(
+    image: UploadFile = File(...),
+    manual_altitude_m: float | None = Form(None, gt=0),
+) -> InspectResult:
     """Best-effort pre-fill suggestions for the analyze form -- run on
     upload, before the user has entered anything. Never blocks or replaces
-    /analyze; a failure here should never prevent a real analysis."""
+    /analyze; a failure here should never prevent a real analysis.
+
+    manual_altitude_m is the one last-resort field the frontend surfaces
+    only when area_source comes back "unavailable" on a first (no-altitude)
+    call -- it is never asked for up front.
+    """
     if image.content_type not in {"image/jpeg", "image/png"}:
         raise HTTPException(415, "Only JPG and PNG images are supported.")
     suffix = Path(image.filename or "field.jpg").suffix
@@ -69,7 +77,7 @@ async def inspect(image: UploadFile = File(...)) -> InspectResult:
         if cv_image is None:
             raise HTTPException(422, "The uploaded image could not be decoded.")
         crop_type, confidence = classifier.classify(cv_image)
-        area_ha, area_source = estimate_area_hectares(path)
+        area_ha, area_source = estimate_area_hectares(path, crop_type, manual_altitude_m)
         return InspectResult(
             crop_type=crop_type,
             confidence=round(confidence * 100, 2),

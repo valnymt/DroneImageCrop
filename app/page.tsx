@@ -223,6 +223,12 @@ export default function Home() {
   const [inspecting, setInspecting] = useState(false);
   const [cropSuggested, setCropSuggested] = useState(false);
   const [areaSuggested, setAreaSuggested] = useState(false);
+  // "unavailable" after a completed inspection means neither EXIF/XMP
+  // altitude nor the row-spacing heuristic could place a scale on this
+  // photo -- only then does the UI ask for the one last-resort field
+  // (flight altitude) instead of silently keeping the stale default area.
+  const [areaSource, setAreaSource] = useState<string | null>(null);
+  const [manualAltitude, setManualAltitude] = useState("");
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
   const inputRef = useRef<HTMLInputElement>(null);
   const inspectRequestId = useRef(0);
@@ -282,10 +288,12 @@ export default function Home() {
     setPreview(URL.createObjectURL(f));
     setCropSuggested(false);
     setAreaSuggested(false);
+    setAreaSource(null);
+    setManualAltitude("");
     inspectPromiseRef.current = inspectImage(f);
   }
 
-  async function inspectImage(f: File) {
+  async function inspectImage(f: File, manualAltitudeM?: number) {
     const requestId = ++inspectRequestId.current;
     setInspecting(true);
     const controller = new AbortController();
@@ -293,12 +301,14 @@ export default function Home() {
     try {
       const formData = new FormData();
       formData.append("image", f);
+      if (manualAltitudeM) formData.append("manual_altitude_m", String(manualAltitudeM));
       const res = await fetch(`${API_BASE}/api/inspect`, { method: "POST", body: formData, signal: controller.signal });
       if (requestId !== inspectRequestId.current || !res.ok) return;
       const result: InspectResult = await res.json();
       if (requestId !== inspectRequestId.current) return;
       if (result.crop_type in yieldDefaults) applyCrop(result.crop_type, true);
       if (result.estimated_area_hectares != null) applyArea(String(result.estimated_area_hectares), true);
+      setAreaSource(result.area_source);
     } catch {
       // Best-effort only: network error, timeout/abort, or the backend
       // being down. Falls back to the last-known crop/area defaults so
@@ -308,6 +318,15 @@ export default function Home() {
       clearTimeout(timeout);
       if (requestId === inspectRequestId.current) setInspecting(false);
     }
+  }
+
+  // The one last-resort field: only surfaced after a completed inspection
+  // came back with no usable ground scale from either EXIF/XMP or the
+  // row-spacing heuristic. Re-runs inspection with the altitude supplied.
+  function estimateWithManualAltitude() {
+    const altitude = Number(manualAltitude);
+    if (!file || !altitude || altitude <= 0) return;
+    inspectPromiseRef.current = inspectImage(file, altitude);
   }
 
   async function runAnalysis() {
@@ -392,7 +411,7 @@ export default function Home() {
         <header><div><span className="eyebrow">DRONE CROP INTELLIGENCE</span><h1>{view === "dashboard" ? "Field overview" : view === "analyze" ? "Analyze a field" : view === "results" ? "Analysis complete" : view === "history" ? "Field history" : "System settings"}</h1></div><div className="header-actions"><button className="icon-btn">?</button><button className="icon-btn">♢</button><button className="primary compact" onClick={() => setView("analyze")}>＋ New analysis</button></div></header>
 
         {view === "dashboard" && <Dashboard records={records} totals={totals} onAnalyze={() => setView("analyze")} onHistory={() => setView("history")} />}
-        {view === "analyze" && <Upload file={file} preview={preview} fieldName={fieldName} crop={crop} area={area} analyzing={analyzing} error={analyzeError} inspecting={inspecting} cropSuggested={cropSuggested} areaSuggested={areaSuggested} areaUnit={settings.areaUnit} inputRef={inputRef} onFile={chooseFile} setFieldName={setFieldName} run={runAnalysis} />}
+        {view === "analyze" && <Upload file={file} preview={preview} fieldName={fieldName} crop={crop} area={area} analyzing={analyzing} error={analyzeError} inspecting={inspecting} cropSuggested={cropSuggested} areaSuggested={areaSuggested} areaSource={areaSource} manualAltitude={manualAltitude} setManualAltitude={setManualAltitude} onEstimateAltitude={estimateWithManualAltitude} areaUnit={settings.areaUnit} inputRef={inputRef} onFile={chooseFile} setFieldName={setFieldName} run={runAnalysis} />}
         {view === "results" && latest && <Results data={latest} file={file} areaUnit={settings.areaUnit} onNew={() => setView("analyze")} />}
         {view === "history" && <History records={records} loading={historyLoading} error={historyError} onRetry={fetchHistory} areaUnit={settings.areaUnit} />}
         {view === "settings" && <Settings settings={settings} onSave={saveSettings} />}
@@ -462,7 +481,7 @@ function Upload(p: any) {
 
   return <div className="page narrow"><div className="steps steps-2"><span className="done">1</span><i /><span>2</span><small>Upload imagery</small><small>AI analysis</small></div>
     <section className="upload-grid"><article className="panel upload-panel"><h3>Drone imagery</h3><p>Upload a high-resolution aerial image of your field.</p><div className={`dropzone ${p.preview ? "has-image" : ""}`} onClick={() => p.inputRef.current?.click()} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); p.onFile(e.dataTransfer.files[0]); }}>{p.preview ? <img src={p.preview} alt="Selected aerial field" /> : <><div className="upload-icon">↥</div><b>Drop your drone image here</b><span>or click to browse your files</span><small>JPG or PNG · Maximum 20 MB</small></>}{p.inspecting && <span className="inspect-status"><span className="spinner" /> AI is reading crop type and field area…</span>}<input ref={p.inputRef} hidden type="file" accept="image/png,image/jpeg" onChange={(e) => p.onFile(e.target.files?.[0])} /></div>{p.file && <div className="file-pill"><span>✓</span><div><b>{p.file.name}</b><small>{(p.file.size / 1048576).toFixed(2)} MB · Ready for analysis</small></div><button onClick={(e) => { e.stopPropagation(); p.inputRef.current?.click(); }}>Replace</button></div>}</article>
-    <article className="panel form-panel"><h3>AI-assisted analysis</h3><p>No setup needed — crop type, field area and yield are predicted from the photo itself.</p><label>FIELD NAME (OPTIONAL)<input value={p.fieldName} onChange={(e) => p.setFieldName(e.target.value)} placeholder="e.g. West Field" /></label>{p.file && <div className="ai-predict-summary">{p.inspecting ? <span><span className="spinner" /> Detecting crop type and field area…</span> : <><span>AI detected: <b>{p.crop}</b> · <b>{toDisplayArea(p.area)} {unit}</b> (estimated)</span><small>Not sure this is right? You can adjust it from the Results screen after analysis.</small></>}</div>}<div className="tech-note"><b>⌁ RGB health analysis</b><span>The uploaded image is measured for green vegetation coverage using three independent RGB indices (Excess Green, VARI, ExGR) that must agree before a pixel counts as vegetation. Non-green areas are treated as bare soil or stressed ground, not classified by color. Results are visual indicators—not a laboratory diagnosis.</span></div>{p.error && <div className="tech-note error-note"><b>⚠ Analysis failed</b><span>{p.error}</span></div>}<button className="primary full" disabled={!p.file || p.analyzing || p.inspecting} onClick={p.run}>{p.analyzing ? <><span className="spinner" /> Running computer-vision pipeline…</> : <>Run image analysis <span>→</span></>}</button></article></section>
+    <article className="panel form-panel"><h3>AI-assisted analysis</h3><p>No setup needed — crop type, field area and yield are predicted from the photo itself.</p><label>FIELD NAME (OPTIONAL)<input value={p.fieldName} onChange={(e) => p.setFieldName(e.target.value)} placeholder="e.g. West Field" /></label>{p.file && <div className="ai-predict-summary">{p.inspecting ? <span><span className="spinner" /> Detecting crop type and field area…</span> : <><span>AI detected: <b>{p.crop}</b> · <b>{toDisplayArea(p.area)} {unit}</b> (estimated)</span><small>Not sure this is right? You can adjust it from the Results screen after analysis.</small></>}</div>}{p.file && !p.inspecting && p.areaSource === "unavailable" && <div className="parameter-note"><b>Couldn't measure ground area from this photo</b><span>No altitude data and no visible row pattern to measure against. If you know the drone's flight altitude, enter it below for a more accurate area — otherwise a default area estimate is used.</span><div className="altitude-inline"><input type="number" min="1" step="1" placeholder="Flight altitude (m)" value={p.manualAltitude} onChange={(e) => p.setManualAltitude(e.target.value)} /><button type="button" className="ghost" onClick={p.onEstimateAltitude} disabled={!p.manualAltitude || Number(p.manualAltitude) <= 0}>Estimate</button></div></div>}<div className="tech-note"><b>⌁ RGB health analysis</b><span>The uploaded image is measured for green vegetation coverage using three independent RGB indices (Excess Green, VARI, ExGR) that must agree before a pixel counts as vegetation. Non-green areas are treated as bare soil or stressed ground, not classified by color. Results are visual indicators—not a laboratory diagnosis.</span></div>{p.error && <div className="tech-note error-note"><b>⚠ Analysis failed</b><span>{p.error}</span></div>}<button className="primary full" disabled={!p.file || p.analyzing || p.inspecting} onClick={p.run}>{p.analyzing ? <><span className="spinner" /> Running computer-vision pipeline…</> : <>Run image analysis <span>→</span></>}</button></article></section>
   </div>;
 }
 
