@@ -42,7 +42,10 @@ def _mocked_pipeline() -> CropAnalysisPipeline:
     pipeline.detector = MagicMock()
     pipeline.detector.detect.return_value = []
     pipeline.segmenter = MagicMock()
-    pipeline.segmenter.refine.return_value = np.zeros((50, 50), dtype=np.uint8)
+    # Real SAMSegmenter.union_masks/refine semantics: [] of instance masks
+    # unions to an all-empty coverage mask, same as the old default mock.
+    pipeline.segmenter.segment_instances.return_value = []
+    pipeline.segmenter.union_masks.side_effect = lambda instances, shape: np.zeros(shape, dtype=np.uint8)
     return pipeline
 
 
@@ -54,7 +57,7 @@ class TestPipelineSettings:
 
         pipeline.analyze(path, "Wheat", 2.0, 0.02, refine_segmentation=False)
 
-        pipeline.segmenter.refine.assert_not_called()
+        pipeline.segmenter.segment_instances.assert_not_called()
 
     def test_refine_segmentation_true_calls_sam(self, tmp_path):
         pipeline = _mocked_pipeline()
@@ -63,7 +66,7 @@ class TestPipelineSettings:
 
         pipeline.analyze(path, "Wheat", 2.0, 0.02, refine_segmentation=True)
 
-        pipeline.segmenter.refine.assert_called_once()
+        pipeline.segmenter.segment_instances.assert_called_once()
 
     def test_passes_enhance_and_conf_threshold_through(self, tmp_path):
         pipeline = _mocked_pipeline()
@@ -87,9 +90,11 @@ class TestTextureAffectsHealthScore:
         path = tmp_path / "img.jpg"
         cv2.imwrite(str(path), np.zeros((80, 80, 3), dtype=np.uint8))
 
+        full_coverage_mask = np.full((80, 80), 255, dtype=np.uint8)
+
         uniform_pipeline = _mocked_pipeline()
         uniform_pipeline.cv.load_and_preprocess.return_value = np.full((80, 80, 3), (60, 150, 60), dtype=np.uint8)
-        uniform_pipeline.segmenter.refine.return_value = np.full((80, 80), 255, dtype=np.uint8)
+        uniform_pipeline.segmenter.union_masks.side_effect = lambda instances, shape: full_coverage_mask
         uniform_result = uniform_pipeline.analyze(path, "Wheat", 2.0)
 
         rng = np.random.default_rng(0)
@@ -98,7 +103,7 @@ class TestTextureAffectsHealthScore:
         noisy = np.clip(noisy.astype(np.int16) + noise, 0, 255).astype(np.uint8)
         patchy_pipeline = _mocked_pipeline()
         patchy_pipeline.cv.load_and_preprocess.return_value = noisy
-        patchy_pipeline.segmenter.refine.return_value = np.full((80, 80), 255, dtype=np.uint8)
+        patchy_pipeline.segmenter.union_masks.side_effect = lambda instances, shape: full_coverage_mask
         patchy_result = patchy_pipeline.analyze(path, "Wheat", 2.0)
 
         assert uniform_result.texture_pattern == "uniform"
@@ -150,7 +155,7 @@ class TestTiltCorrectionWiring:
         # corrected geometry, not the original tilted photo.
         pipeline = _mocked_pipeline()
         corrected_image = np.full((64, 96, 3), (60, 150, 60), dtype=np.uint8)
-        pipeline.segmenter.refine.return_value = np.zeros((64, 96), dtype=np.uint8)
+        pipeline.segmenter.union_masks.side_effect = lambda instances, shape: np.zeros((64, 96), dtype=np.uint8)
         pipeline.tilt = MagicMock()
         pipeline.tilt.correct.return_value = SimpleNamespace(corrected=True, image=corrected_image, note="Perspective corrected.")
         path = tmp_path / "img.jpg"
@@ -164,3 +169,56 @@ class TestTiltCorrectionWiring:
         assert result.tilt_corrected is True
         assert result.image_width == 96 and result.image_height == 64
         assert result.tilt_correction_note == "Perspective corrected."
+
+
+class TestPlantSizeStatsWiring:
+    def test_refine_segmentation_false_means_no_plant_size_stats(self, tmp_path):
+        # No per-instance masks exist without SAM refinement -- must not
+        # fabricate size stats from plant_count alone.
+        pipeline = _mocked_pipeline()
+        path = tmp_path / "img.jpg"
+        cv2.imwrite(str(path), np.zeros((50, 50, 3), dtype=np.uint8))
+
+        result = pipeline.analyze(path, "Wheat", 2.0, refine_segmentation=False)
+
+        assert result.plant_size_stats is None
+        pipeline.segmenter.segment_instances.assert_not_called()
+
+    def test_sam_unavailable_means_no_plant_size_stats(self, tmp_path):
+        # segment_instances returning None (SAM unavailable / no
+        # detections) must propagate to no stats, not an empty/zeroed one.
+        pipeline = _mocked_pipeline()
+        pipeline.segmenter.segment_instances.return_value = None
+        pipeline.segmenter.union_masks.side_effect = lambda instances, shape: np.zeros(shape, dtype=np.uint8)
+        path = tmp_path / "img.jpg"
+        cv2.imwrite(str(path), np.zeros((50, 50, 3), dtype=np.uint8))
+
+        result = pipeline.analyze(path, "Wheat", 2.0, refine_segmentation=True)
+
+        assert result.plant_size_stats is None
+
+    def test_real_instance_masks_produce_real_plant_size_stats(self, tmp_path):
+        pipeline = _mocked_pipeline()
+        h, w = 100, 100
+        pipeline.cv.load_and_preprocess.return_value = np.zeros((h, w, 3), dtype=np.uint8)
+        pipeline.cv.vegetation_metrics.return_value = SimpleNamespace(
+            green_mask=np.zeros((h, w), dtype=np.uint8),
+            coverage_percent=10.0, vegetation_score=20.0, health_score=30.0,
+            heatmap=np.zeros((h, w, 3), dtype=np.uint8),
+        )
+        small = np.zeros((h, w), dtype=bool)
+        cv2.circle(small.view(np.uint8), (20, 20), 8, 1, -1)
+        large = np.zeros((h, w), dtype=bool)
+        cv2.circle(large.view(np.uint8), (70, 70), 8, 1, -1)
+        pipeline.segmenter.segment_instances.return_value = [small, large]
+        pipeline.segmenter.union_masks.side_effect = lambda instances, shape: np.zeros(shape, dtype=np.uint8)
+        path = tmp_path / "img.jpg"
+        cv2.imwrite(str(path), np.zeros((h, w, 3), dtype=np.uint8))
+
+        # area_ha=1 over a 100x100 frame -> exactly 1 cm^2/px, so the
+        # returned areas are directly checkable against pixel counts.
+        result = pipeline.analyze(path, "Wheat", area_ha=0.0001)
+
+        assert result.plant_size_stats is not None
+        assert result.plant_size_stats.plant_count == 2
+        assert result.plant_size_stats.mean_area_cm2 > 0

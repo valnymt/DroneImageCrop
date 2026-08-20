@@ -1,3 +1,4 @@
+from dataclasses import asdict
 from pathlib import Path
 
 import cv2
@@ -5,8 +6,9 @@ import numpy as np
 
 from app.services.image_encoding import encode_png_data_url
 from app.services.opencv_processor import OpenCVProcessor
+from app.services.plant_size_analyzer import PlantSizeAnalyzer
 from app.services.sam_segmenter import SAMSegmenter
-from app.services.schemas import AnalysisResult
+from app.services.schemas import AnalysisResult, PlantSizeStats
 from app.services.texture_analyzer import TextureAnalyzer
 from app.services.tilt_corrector import TiltCorrector
 from app.services.yield_estimator import YieldEstimator
@@ -37,6 +39,7 @@ class CropAnalysisPipeline:
         self.segmenter = SAMSegmenter()
         self.texture = TextureAnalyzer()
         self.tilt = TiltCorrector()
+        self.plant_size = PlantSizeAnalyzer()
         self.yield_estimator = YieldEstimator()
 
     def analyze(
@@ -62,9 +65,14 @@ class CropAnalysisPipeline:
         detections = self.detector.detect(image, conf_threshold=conf_threshold)
         plant_count = len(detections)
         # YOLO's boxes are used as SAM prompts, so detection must run first.
+        # segment_instances is called once here (not SAMSegmenter.refine,
+        # which would re-run the same SAM predictions) so the per-plant
+        # masks are available for size/shape stats below instead of only
+        # ever being unioned together and discarded.
+        instance_masks = self.segmenter.segment_instances(image, detections) if refine_segmentation else None
         refined_mask = (
-            self.segmenter.refine(image, vegetation.green_mask, detections)
-            if refine_segmentation
+            self.segmenter.union_masks(instance_masks, vegetation.green_mask.shape[:2])
+            if instance_masks is not None
             else vegetation.green_mask
         )
         confidence = 100 * sum(d.confidence for d in detections) / max(plant_count, 1)
@@ -81,6 +89,11 @@ class CropAnalysisPipeline:
         per_plant_kg = self.yield_estimator.resolve_per_plant_kg(crop, average_kg)
         estimated = self.yield_estimator.estimate(plant_count, crop, crop_coverage, health, average_kg)
         h, w = image.shape[:2]
+        # Same uniform-ground-scale assumption crop_density already makes
+        # (area_ha spread evenly across the frame) -- not a new one
+        # introduced for this.
+        cm2_per_pixel = (area_ha * 1e8) / (w * h)
+        plant_size = self.plant_size.analyze(instance_masks, cm2_per_pixel) if instance_masks else None
         return AnalysisResult(
             plant_count=plant_count,
             crop_density=round(plant_count / area_ha, 2),
@@ -99,6 +112,7 @@ class CropAnalysisPipeline:
             # matches this pipeline's geometry exactly and re-sending the
             # same bytes would just be wasted payload.
             analyzed_image=encode_png_data_url(image) if (tilt is not None and tilt.corrected) else None,
+            plant_size_stats=PlantSizeStats(**asdict(plant_size)) if plant_size is not None else None,
             estimated_yield=estimated,
             average_yield_per_plant_kg=round(per_plant_kg, 3),
             confidence_score=round(confidence, 2),

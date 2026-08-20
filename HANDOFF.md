@@ -7,9 +7,9 @@ Repo: `https://github.com/valnymt/DroneImageCrop.git` (remote `origin`, on branc
 ## Current state
 
 Working tree is clean. Everything through Phase N was pushed to `origin/main`. Phase O
-(documentation-only, no code), Phase P (texture analysis), Phase Q (flight comparison), and
-Phase R (perspective/tilt correction) are committed locally, not yet pushed — push when the
-user asks for it.
+(documentation-only, no code), Phase P (texture analysis), Phase Q (flight comparison), Phase R
+(perspective/tilt correction), and Phase S (per-plant size/shape stats) are committed locally,
+not yet pushed — push when the user asks for it.
 
 ## How to run it
 
@@ -278,6 +278,35 @@ synthetic tilted field photo correctly showed "· perspective corrected" + a "�
 badge, and the displayed Detection-tab image was confirmed to be the backend-rendered corrected
 frame (a `data:` URL at the corrected dimensions), not the stale original preview.
 
+## Phase S — per-plant size/shape distribution (nearly free from SAM's own masks)
+
+New `backend/app/services/plant_size_analyzer.py`. `SAMSegmenter` was already computing one
+mask per detected plant (box-prompted, one `predictor.predict()` call per YOLO box) and
+immediately throwing them away by unioning them into a single coverage mask -- refactored into
+`segment_instances()` (returns the list of per-plant masks) + a `union_masks()` static helper,
+with `refine()` now just calling both, so nothing runs SAM's prediction loop twice and the
+per-plant masks fall out of work the pipeline was already doing.
+
+For each per-plant mask: largest contour's area (converted to real cm² using the same uniform
+ground-scale assumption `crop_density` already makes -- `area_ha` spread evenly across the
+frame, not a new assumption introduced here) and `minAreaRect` elongation (long side / short
+side). Aggregated into `plant_count`, mean/median/min/max area, mean aspect ratio, and a
+`size_uniformity_score` (0-100, from the coefficient of variation of per-plant area) --
+**a second axis of analysis independent of plant_count and health_score**: two fields with the
+same count and the same averaged health can still have very differently distributed individual
+plants (uneven emergence timing, competition, or patchy stress that an averaged number alone
+can't show). `None` whenever segmentation refinement was off or SAM wasn't available -- not
+fabricated from `plant_count` alone.
+
+9 new `PlantSizeAnalyzer` tests (uniform-circles-scores-100, widely-varied-scores-low,
+elongated-shape-has-higher-aspect-ratio, area scaling, empty/no-contour edge cases), 6 new
+`SAMSegmenter` tests (`union_masks` correctness, `segment_instances`/`refine` fallback without a
+checkpoint, and that `refine()` stays consistent with `segment_instances()` rather than
+diverging into two code paths), 3 new pipeline-wiring tests -- 153 backend tests passing total.
+Verified end-to-end through the real `/api/analyze` endpoint against an in-distribution
+validation image (2 real plant detections, real SAM masks, real computed stats matching what
+the browser then rendered in a new "Per-plant size & shape" Results panel).
+
 ## Key files
 
 | File | Purpose |
@@ -290,6 +319,7 @@ frame (a `data:` URL at the corrected dimensions), not the stale original previe
 | `backend/app/services/texture_analyzer.py` | GLCM/Haralick texture uniformity (Phase P) |
 | `backend/app/services/flight_comparator.py` | ORB + homography flight-to-flight diff (Phase Q) |
 | `backend/app/services/tilt_corrector.py` | Vanishing-point perspective correction (Phase R) |
+| `backend/app/services/plant_size_analyzer.py` | Per-plant size/shape stats from SAM masks (Phase S) |
 | `backend/app/services/sam_segmenter.py` | Box-prompted SAM refinement |
 | `backend/app/services/report_generator.py` | PDF export |
 | `backend/app/api/analysis.py` | All three HTTP endpoints |

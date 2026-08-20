@@ -51,15 +51,33 @@ class SAMSegmenter:
         self._predictor = SamPredictor(model)
         return self._predictor
 
-    def refine(self, image: np.ndarray, initial_mask: np.ndarray, detections: list[Detection] | None = None) -> np.ndarray:
+    def segment_instances(self, image: np.ndarray, detections: list[Detection] | None) -> list[np.ndarray] | None:
+        """One boolean mask per detected plant (box-prompted SAM, same
+        predictor call `refine` already made) -- None when SAM isn't
+        available or there's nothing to prompt it with, never an empty
+        list standing in for "no plants" vs. "couldn't segment", which
+        would be ambiguous to callers.
+        """
         predictor = self._load()
         if predictor is None or not detections:
-            return initial_mask
-
+            return None
         predictor.set_image(image, image_format="BGR")
-        refined = np.zeros(initial_mask.shape[:2], dtype=np.uint8)
+        instances = []
         for detection in detections:
             box = np.array([detection.x1, detection.y1, detection.x2, detection.y2])
             masks, _, _ = predictor.predict(box=box, multimask_output=False)
-            refined[masks[0]] = 255
-        return refined
+            instances.append(masks[0])
+        return instances
+
+    def refine(self, image: np.ndarray, initial_mask: np.ndarray, detections: list[Detection] | None = None) -> np.ndarray:
+        instances = self.segment_instances(image, detections)
+        if instances is None:
+            return initial_mask
+        return self.union_masks(instances, initial_mask.shape[:2])
+
+    @staticmethod
+    def union_masks(instances: list[np.ndarray], shape: tuple[int, int]) -> np.ndarray:
+        union = np.zeros(shape, dtype=np.uint8)
+        for mask in instances:
+            union[mask] = 255
+        return union

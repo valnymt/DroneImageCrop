@@ -10,6 +10,21 @@ class Detection(BaseModel):
     label: str
 
 
+class PlantSizeStats(BaseModel):
+    """Per-plant size/shape distribution from SAM's own instance masks
+    (see app/services/plant_size_analyzer.py) -- a second axis of analysis
+    beyond plant_count: two fields with the same count and health score can
+    still have very differently distributed individual plants."""
+
+    plant_count: int = Field(ge=0)
+    mean_area_cm2: float = Field(ge=0)
+    median_area_cm2: float = Field(ge=0)
+    min_area_cm2: float = Field(ge=0)
+    max_area_cm2: float = Field(ge=0)
+    mean_aspect_ratio: float = Field(ge=1)
+    size_uniformity_score: float = Field(ge=0, le=100)
+
+
 class AnalysisResult(BaseModel):
     plant_count: int = Field(ge=0)
     crop_density: float = Field(ge=0)
@@ -38,6 +53,10 @@ class AnalysisResult(BaseModel):
     # None the rest of the time; callers should fall back to their own
     # original image, which is identical in that case anyway.
     analyzed_image: str | None = None
+    # None whenever segmentation refinement was off or SAM wasn't
+    # available (the plain Excess Green mask has no per-instance
+    # boundaries to measure) -- not fabricated from plant_count alone.
+    plant_size_stats: PlantSizeStats | None = None
     estimated_yield: float = Field(ge=0)
     # The per-plant yield actually used to compute estimated_yield --
     # either a caller-supplied override or the pipeline's own crop-specific

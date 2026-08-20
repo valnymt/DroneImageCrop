@@ -79,6 +79,21 @@ type AnalysisResult = {
   // image_width/image_height are actually relative to, which the app's
   // own original upload preview no longer matches at that point.
   analyzed_image: string | null;
+  // Per-plant size/shape distribution from SAM's own instance masks --
+  // null whenever segmentation refinement was off or SAM wasn't
+  // available (the plain vegetation mask has no per-plant boundaries to
+  // measure). A second axis of analysis beyond plant_count: two fields
+  // with the same count and health score can still have very differently
+  // distributed individual plants.
+  plant_size_stats: {
+    plant_count: number;
+    mean_area_cm2: number;
+    median_area_cm2: number;
+    min_area_cm2: number;
+    max_area_cm2: number;
+    mean_aspect_ratio: number;
+    size_uniformity_score: number;
+  } | null;
   estimated_yield: number;
   // The per-plant yield the backend actually used to compute
   // estimated_yield (its own crop-specific baseline, health/coverage-
@@ -682,6 +697,7 @@ function Results({ data, file, areaUnit, onNew, onAdjust }: { data: Analysis; fi
         tilt_corrected: data.tilt_corrected,
         tilt_correction_note: data.tilt_correction_note,
         analyzed_image: data.analyzed_image,
+        plant_size_stats: data.plant_size_stats,
         estimated_yield: data.estimated_yield,
         average_yield_per_plant_kg: data.average_yield_per_plant_kg,
         confidence_score: data.confidence_score,
@@ -755,6 +771,15 @@ function Results({ data, file, areaUnit, onNew, onAdjust }: { data: Analysis; fi
     <section className="result-metrics">{[["PLANT COUNT", data.plant_count.toLocaleString(), "detected plants"], ["CROP DENSITY", densityValue.toLocaleString(undefined, {maximumFractionDigits: 2}), densityLabel], ["CROP COVERAGE", `${data.crop_coverage}%`, "segmented area"], ["HEALTH SCORE", `${Math.round(data.health_score)}/100`, "strong vegetation"], ["EST. HARVEST", `${data.estimated_yield.toLocaleString()} kg`, `${(data.estimated_yield / 1000).toFixed(2)} metric tons`]].map(([a,b,c]) => <article key={a}><small>{a}</small><b>{b}</b><span>{c}</span></article>)}</section>
     <section className="vision-grid"><article className="panel vision-panel"><div className="panel-head"><div><h3>Computer vision output</h3><p>Detection and segmentation layers{data.tilt_corrected ? " · perspective corrected" : ""}</p></div><div className="seg-tabs"><button className={tab === "detection" ? "selected" : ""} onClick={() => setTab("detection")}>Detection</button><button className={tab === "segmentation" ? "selected" : ""} onClick={() => setTab("segmentation")}>Segmentation</button><button className={tab === "heatmap" ? "selected" : ""} onClick={() => setTab("heatmap")}>Heatmap</button></div></div><div className="result-image" ref={imageContainerRef}>{tab === "detection" && (data.analyzed_image ?? data.image) && <img src={data.analyzed_image ?? data.image} alt="Analyzed crop field" />}{tab === "segmentation" && <img src={data.segmentation_overlay} alt="Segmentation mask overlay" />}{tab === "heatmap" && <img src={data.heatmap_overlay} alt="Vegetation density heatmap" />}{tab === "detection" && transform && data.detections.map((d, i) => <span key={i} className="bbox" style={{ left: d.x1 * transform.scaleX - transform.offsetX, top: d.y1 * transform.scaleY - transform.offsetY, width: (d.x2 - d.x1) * transform.scaleX, height: (d.y2 - d.y1) * transform.scaleY }}>{showBoxLabels ? `${d.label} .${Math.round(d.confidence * 100)}` : ""}</span>)}{tab === "detection" && <div className="model-badge">YOLO DETECTIONS · {data.plant_count.toLocaleString()}</div>}{tab === "detection" && data.tilt_corrected && <div className="model-badge tilt-badge">⇕ TILT CORRECTED</div>}</div></article>
     <article className={`panel insights health-${data.health_score >= 80 ? "good" : data.health_score >= 55 ? "mixed" : "poor"}`}><h3>Field intelligence</h3><p>Interpreted from visible RGB vegetation signals.</p><div className="score"><div className="score-ring" style={{"--score": `${data.health_score * 3.6}deg`} as React.CSSProperties}><span><b>{Math.round(data.health_score)}</b><small>/ 100</small></span></div><div><b>{healthLabel}</b><p>{healthCopy}</p></div></div><hr /><div className="insight-row"><span>GREEN VEGETATION RATIO</span><b>{data.vegetation_score.toFixed(1)}%</b></div><div className="bar"><i style={{width: `${data.vegetation_score}%`}} /></div><div className="insight-row"><span>TEXTURE PATTERN</span><b>{data.texture_pattern} · {data.texture_uniformity_score.toFixed(0)}%</b></div><div className={`bar texture-${data.texture_pattern}`}><i style={{width: `${data.texture_uniformity_score}%`}} /></div><div className="insight-row"><span>AVG. DETECTION CONFIDENCE</span><b>{data.confidence_score.toFixed(1)}%</b></div><div className="bar"><i style={{width: `${data.confidence_score}%`}} /></div><div className="method-warning"><b>RGB screening result</b><span>Color analysis can flag suspicious areas, but cannot distinguish disease from drought, mature crops, harvest residue, shadows, or soil without field context.</span></div><div className="method-warning"><b>Texture screening result</b><span>GLCM/Haralick texture on the segmented canopy separates uniform condition changes (drought, nutrient stress) from patchy ones (disease, pest damage) -- it flags a pattern, not a diagnosis.</span></div><div className="recommend"><b>Recommendation</b><p>{recommendation}</p></div></article></section>
+    {data.plant_size_stats && <section className="panel plant-size-panel"><h3>Per-plant size &amp; shape</h3><p>Measured from SAM's own per-plant masks, not just plant count -- a second axis of analysis independent of health/texture.</p>
+      <div className="plant-size-grid">
+        <article><small>MEAN CANOPY AREA</small><b>{data.plant_size_stats.mean_area_cm2.toLocaleString(undefined, {maximumFractionDigits: 0})} cm²</b><span>median {data.plant_size_stats.median_area_cm2.toLocaleString(undefined, {maximumFractionDigits: 0})} cm²</span></article>
+        <article><small>SIZE RANGE</small><b>{data.plant_size_stats.min_area_cm2.toLocaleString(undefined, {maximumFractionDigits: 0})}–{data.plant_size_stats.max_area_cm2.toLocaleString(undefined, {maximumFractionDigits: 0})} cm²</b><span>smallest to largest plant</span></article>
+        <article><small>SIZE UNIFORMITY</small><b>{data.plant_size_stats.size_uniformity_score.toFixed(0)}/100</b><span>{data.plant_size_stats.size_uniformity_score >= 70 ? "even stand establishment" : data.plant_size_stats.size_uniformity_score >= 40 ? "moderately uneven sizing" : "highly uneven sizing"}</span></article>
+        <article><small>MEAN ELONGATION</small><b>{data.plant_size_stats.mean_aspect_ratio.toFixed(2)}×</b><span>{data.plant_size_stats.mean_aspect_ratio <= 1.3 ? "compact / round canopy" : "narrow / elongated canopy"}</span></article>
+      </div>
+      <div className="method-warning"><b>Size/shape screening result</b><span>Low size uniformity across an otherwise healthy-looking field can point at uneven emergence timing, plant competition, or patchy stress that an averaged health score alone wouldn't show.</span></div>
+    </section>}
   </div>;
 }
 
