@@ -22,6 +22,7 @@ FAKE_RESULT = AnalysisResult(
     vegetation_score=60.0,
     health_score=58.0,
     estimated_yield=30.2,
+    average_yield_per_plant_kg=0.02,
     confidence_score=88.0,
     detections=[],
     image_width=640,
@@ -30,7 +31,11 @@ FAKE_RESULT = AnalysisResult(
     heatmap_overlay="data:image/png;base64,fake-heat",
 )
 
-VALID_FORM = {"crop_type": "Wheat", "field_size_hectares": "2", "average_yield_per_plant_kg": "0.02"}
+# average_yield_per_plant_kg is intentionally omitted here -- it's now
+# optional (see test_analyze_omits_yield_override_by_default below), and
+# the "supply an override" path is exercised separately in
+# test_analyze_passes_form_fields_through_to_pipeline.
+VALID_FORM = {"crop_type": "Wheat", "field_size_hectares": "2"}
 
 
 def test_health_endpoint():
@@ -106,6 +111,23 @@ def test_analyze_passes_form_fields_through_to_pipeline(mock_pipeline):
     assert crop_type == "Corn"
     assert field_size_hectares == 3.5
     assert average_yield_per_plant_kg == 0.18
+
+
+@patch("app.api.analysis.pipeline")
+def test_analyze_omits_yield_override_by_default(mock_pipeline):
+    # No average_yield_per_plant_kg in the form (VALID_FORM doesn't include
+    # it) -- the pipeline must receive None, not a fabricated frontend
+    # default, so it resolves its own crop-specific baseline instead.
+    mock_pipeline.analyze.return_value = FAKE_RESULT
+
+    client.post(
+        "/api/analyze",
+        files={"image": ("test.jpg", b"fake-bytes", "image/jpeg")},
+        data=VALID_FORM,
+    )
+
+    args, _ = mock_pipeline.analyze.call_args
+    assert args[3] is None
 
 
 @patch("app.api.analysis.pipeline")

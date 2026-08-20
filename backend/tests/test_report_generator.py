@@ -13,6 +13,7 @@ def make_result(**overrides) -> AnalysisResult:
         vegetation_score=61.0,
         health_score=58.0,
         estimated_yield=2.16,
+        average_yield_per_plant_kg=0.18,
         confidence_score=71.4,
         detections=[],
         image_width=300,

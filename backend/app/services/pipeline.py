@@ -40,7 +40,7 @@ class CropAnalysisPipeline:
         path: Path,
         crop: str,
         area_ha: float,
-        average_kg: float,
+        average_kg: float | None = None,
         enhance: bool = True,
         refine_segmentation: bool = True,
         conf_threshold: float = CONF_THRESHOLD,
@@ -56,8 +56,9 @@ class CropAnalysisPipeline:
             else vegetation.green_mask
         )
         confidence = 100 * sum(d.confidence for d in detections) / max(plant_count, 1)
+        per_plant_kg = self.yield_estimator.resolve_per_plant_kg(crop, average_kg)
         estimated = self.yield_estimator.estimate(
-            plant_count, crop, average_kg, vegetation.coverage_percent, vegetation.health_score
+            plant_count, crop, vegetation.coverage_percent, vegetation.health_score, average_kg
         )
         h, w = image.shape[:2]
         return AnalysisResult(
@@ -67,6 +68,7 @@ class CropAnalysisPipeline:
             vegetation_score=vegetation.vegetation_score,
             health_score=vegetation.health_score,
             estimated_yield=estimated,
+            average_yield_per_plant_kg=round(per_plant_kg, 3),
             confidence_score=round(confidence, 2),
             detections=detections,
             image_width=w,

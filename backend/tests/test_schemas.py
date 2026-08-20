@@ -12,6 +12,7 @@ def make_result(**overrides):
         vegetation_score=60.0,
         health_score=70.0,
         estimated_yield=12.5,
+        average_yield_per_plant_kg=0.02,
         confidence_score=80.0,
         detections=[],
         image_width=640,
@@ -33,7 +34,9 @@ class TestAnalysisResult:
         with pytest.raises(ValidationError):
             make_result(**{field: 150.0})
 
-    @pytest.mark.parametrize("field", ["plant_count", "crop_density", "estimated_yield", "confidence_score"])
+    @pytest.mark.parametrize(
+        "field", ["plant_count", "crop_density", "estimated_yield", "average_yield_per_plant_kg", "confidence_score"],
+    )
     def test_nonnegative_fields_reject_negative_values(self, field):
         with pytest.raises(ValidationError):
             make_result(**{field: -1})

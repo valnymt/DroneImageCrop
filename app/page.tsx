@@ -61,6 +61,10 @@ type AnalysisResult = {
   vegetation_score: number;
   health_score: number;
   estimated_yield: number;
+  // The per-plant yield the backend actually used to compute
+  // estimated_yield (its own crop-specific baseline, health/coverage-
+  // adjusted) -- not a value this app invents; persisted to history as-is.
+  average_yield_per_plant_kg: number;
   confidence_score: number;
   detections: Detection[];
   // Pixel space `detections` coordinates are relative to -- the backend's
@@ -195,9 +199,12 @@ async function parseError(res: Response, fallback: string) {
   return (body && typeof body.detail === "string" && body.detail) || fallback;
 }
 
-const yieldDefaults: Record<string, number> = {
-  Wheat: 0.02, Corn: 0.18, Rice: 0.025, Soybean: 0.015, Tomato: 3,
-};
+// Mirrors backend/app/services/yield_estimator.py's YIELD_PER_PLANT_KG
+// keys -- used only to sanity-check CLIP's crop guess before trusting it
+// as a display value. The actual per-plant yield now lives entirely on
+// the backend (see AnalysisResult.average_yield_per_plant_kg); this app no
+// longer keeps its own copy of that table.
+const SUPPORTED_CROPS = ["Wheat", "Corn", "Rice", "Soybean", "Tomato"];
 
 const nav = [
   ["dashboard", "⌂", "Overview"],
@@ -215,7 +222,6 @@ export default function Home() {
   const [preview, setPreview] = useState("");
   const [crop, setCrop] = useState("Wheat");
   const [area, setArea] = useState("2");
-  const [avgYield, setAvgYield] = useState(String(yieldDefaults.Wheat));
   const [fieldName, setFieldName] = useState("West Field");
   const [analyzing, setAnalyzing] = useState(false);
   const [analyzeError, setAnalyzeError] = useState<string | null>(null);
@@ -273,7 +279,6 @@ export default function Home() {
 
   function applyCrop(value: string, suggested: boolean) {
     setCrop(value);
-    setAvgYield(String(yieldDefaults[value]));
     setCropSuggested(suggested);
   }
 
@@ -306,7 +311,7 @@ export default function Home() {
       if (requestId !== inspectRequestId.current || !res.ok) return;
       const result: InspectResult = await res.json();
       if (requestId !== inspectRequestId.current) return;
-      if (result.crop_type in yieldDefaults) applyCrop(result.crop_type, true);
+      if (SUPPORTED_CROPS.includes(result.crop_type)) applyCrop(result.crop_type, true);
       if (result.estimated_area_hectares != null) applyArea(String(result.estimated_area_hectares), true);
       setAreaSource(result.area_source);
     } catch {
@@ -343,7 +348,9 @@ export default function Home() {
       formData.append("image", file);
       formData.append("crop_type", crop);
       formData.append("field_size_hectares", area);
-      formData.append("average_yield_per_plant_kg", avgYield);
+      // average_yield_per_plant_kg is intentionally NOT sent -- the backend
+      // resolves its own crop-specific, health/coverage-adjusted per-plant
+      // yield (see YieldEstimator) rather than this app supplying one.
       formData.append("enhance", String(settings.enhancement));
       formData.append("refine_segmentation", String(settings.segmentationRefinement));
       formData.append("conf_threshold", String(MODEL_PROFILE_CONF[settings.modelProfile]));
@@ -371,7 +378,7 @@ export default function Home() {
           body: JSON.stringify({
             crop_type: crop,
             field_size_hectares: Number(area),
-            average_yield_per_plant_kg: Number(avgYield),
+            average_yield_per_plant_kg: result.average_yield_per_plant_kg,
             plant_count: result.plant_count,
             crop_density: result.crop_density,
             crop_coverage: result.crop_coverage,
@@ -539,6 +546,7 @@ function Results({ data, file, areaUnit, onNew }: { data: Analysis; file: File |
         vegetation_score: data.vegetation_score,
         health_score: data.health_score,
         estimated_yield: data.estimated_yield,
+        average_yield_per_plant_kg: data.average_yield_per_plant_kg,
         confidence_score: data.confidence_score,
         detections: data.detections,
         image_width: data.image_width,

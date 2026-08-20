@@ -17,6 +17,12 @@ class AnalysisResult(BaseModel):
     vegetation_score: float = Field(ge=0, le=100)
     health_score: float = Field(ge=0, le=100)
     estimated_yield: float = Field(ge=0)
+    # The per-plant yield actually used to compute estimated_yield --
+    # either a caller-supplied override or the pipeline's own crop-specific
+    # baseline (see YieldEstimator.YIELD_PER_PLANT_KG). Surfaced so callers
+    # can persist/display the real number used rather than a guess of
+    # their own.
+    average_yield_per_plant_kg: float = Field(ge=0)
     confidence_score: float = Field(ge=0, le=100)
     detections: list[Detection]
     # Pixel space that `detections` coordinates are relative to -- the

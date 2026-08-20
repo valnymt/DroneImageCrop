@@ -31,7 +31,10 @@ async def analyze(
     image: UploadFile = File(...),
     crop_type: str = Form(...),
     field_size_hectares: float = Form(..., gt=0),
-    average_yield_per_plant_kg: float = Form(0.5, gt=0),
+    # Optional override -- when omitted, the pipeline resolves a real
+    # per-plant yield from its own crop-specific baseline instead of
+    # requiring the caller to supply one (see YieldEstimator).
+    average_yield_per_plant_kg: float | None = Form(None, gt=0),
     enhance: bool = Form(True),
     refine_segmentation: bool = Form(True),
     conf_threshold: float = Form(0.25, ge=0, le=1),
