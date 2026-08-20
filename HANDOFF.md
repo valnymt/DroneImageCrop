@@ -6,10 +6,9 @@ Repo: `https://github.com/valnymt/DroneImageCrop.git` (remote `origin`, on branc
 
 ## Current state
 
-Working tree is clean. Everything through Phase I is committed and pushed to `origin/main`
-(commit `cb23660`). **Phase J is also committed and pushed** (`127bb8c`) — see below; it was
-made directly by the user outside this session, so it hasn't been tested/verified the way
-Phases A–I were.
+Working tree is clean. Everything through Phase M is committed locally (Phases J-M are
+**3 commits ahead of `origin/main`, not yet pushed** — push when the user asks for it).
+Phase O (below) is a documentation-only revisit, no code changed.
 
 ## How to run it
 
@@ -83,31 +82,66 @@ successful `/analyze` call. Two independent processes; both must be running.
   real YOLO confidence thresholds (0.15/0.25/0.4), area unit is a real ha/acres conversion
   across Upload/Results/History, persisted to `localStorage`.
 
-- **Phase J** *(not done in this session — see caveat above)* — Removes the manual
-  crop/area/yield form entirely; `/inspect`'s CLIP + EXIF/XMP prediction feeds `/analyze`
-  directly with no confirmation step. `analyze()` now awaits any in-flight inspection so it
-  can't submit stale defaults while a prediction is still loading. Results still shows the
-  AI's prediction read-only, so a wrong guess is visible rather than silently authoritative.
-  Worth noting: this reverses Phase C's original design intent (CLIP is ~69% accurate, which
-  is why Phase C deliberately made it a dismissible *suggestion* rather than authoritative) —
-  if picking this back up, that tradeoff is worth understanding before extending it further.
+- **Phase J** — Removes the manual crop/area/yield form entirely; `/inspect`'s CLIP + EXIF/XMP
+  prediction feeds `/analyze` directly with no confirmation step. `analyze()` awaits any
+  in-flight inspection so it can't submit stale defaults while a prediction is still loading.
+  Worth noting: this reverses Phase C's original design intent (CLIP is ~69% accurate, which is
+  why Phase C deliberately made it a dismissible *suggestion* rather than authoritative) — Phase
+  M (below) is the mitigation for that tradeoff.
+- **Phase K** — Field-area estimation no longer depends on EXIF/XMP alone. Falls back, in
+  order, to: a caller-supplied manual altitude (`/inspect`'s new `manual_altitude_m` field —
+  the one last-resort input the UI shows only after a first call comes back "unavailable"), then
+  a row-spacing heuristic that measures a genuinely repeating crop-row pattern via
+  autocorrelation and converts it to area using a typical row spacing for the detected crop.
+  The row-spacing detector requires both a real local-peak-with-prominence AND a matching
+  harmonic near 2x that lag — an earlier FFT-magnitude version false-positived (0.001 ha) on an
+  ordinary photo of grass with zero row structure; verified against every real photo in
+  `images/` that all correctly now return "unavailable" instead.
+- **Phase L** — `estimated_yield` no longer comes from a flat per-crop constant picked by name.
+  `YieldEstimator` now owns one real per-plant-kg baseline per crop and applies it directly
+  (folding away a previously redundant second crop-factor multiplier), still adjusted by the
+  same coverage/health condition factor. `average_yield_per_plant_kg` is an optional override on
+  `/analyze` now, not a required input; the resolved value comes back on `AnalysisResult` so
+  the frontend persists what was actually used instead of a guess of its own.
+- **Phase M** — Results now shows two confidence badges: CLIP's crop-type confidence, and how
+  the field area was actually derived (measured altitude / manual altitude / row-spacing
+  estimate / unmeasured default), each color-coded high/medium/low. Directly addresses Phase
+  J's tradeoff — a wrong or low-confidence AI guess now reads differently from a verified one.
 
-All of Phases A–I have real backend + frontend tests (78 backend tests passing) and were
-verified live in a browser, not just unit-tested — see individual commit-message-style
-descriptions in the conversation this file came from if you need the detail. Phase J has
-neither backend nor frontend test coverage and hasn't been browser-verified.
+All of Phases A–M have real backend + frontend tests and were verified live in a browser, not
+just unit-tested (96 backend tests passing) — see individual commit-message-style descriptions
+in the conversation this file came from if you need the detail.
 
-## One open item
+## Phase O — Phase D zero-detection question, revisited (settled as far as it can be without the original file)
 
-**Phase D leftover**: the user's real rice-paddy test photo scored 0 plant detections even
-after the tiling fix, because (confirmed via backend logs) the photo never triggered the tiled
-path at all — it's small enough post-preprocessing that it took the single-pass path, same as
-the in-distribution validation images that work fine. That means this specific photo's zero
-result is **not** a scale/tiling problem — it's most likely genuine domain mismatch (the
-fine-tuned YOLO checkpoint only ever saw 823 training images of one dataset's style). This was
-never conclusively settled because the user never provided the actual image file — only
-screenshots. If picking this back up: ask for the file, run `YOLODetector.detect()` on it
-directly with the confidence threshold near zero to see the raw score distribution.
+**Confirmed from the repo itself**: the fine-tuned YOLO checkpoint's training set
+(`training/data/yolo/`, 823 train images) is a generic Roboflow "weed-crop-aerial" dataset —
+classes are `weed-crop-aerial`/`crop`/`weed`, not tied to any specific crop species, and
+nothing rice-specific. The only rice imagery anywhere in this repo
+(`training/data/classify/train/Rice/`, used for the unrelated CLIP crop-type classifier) is
+ground-level single-seedling close-ups, not aerial paddy shots — so there has never been any
+rice-paddy-style imagery in this pipeline's training data at all.
+
+**Diagnostic run** (per the prior handoff's own recommendation — `YOLODetector.detect()` at
+`conf_threshold=0.01`, i.e. effectively unfiltered) against every real photo in this repo that
+is *not* part of the fine-tuning distribution (`images/*.jpg`, plus two rice seedling
+close-ups): max raw confidence per image was **0.01–0.05 in 7 of 9 cases**, only one image (a
+real aerial soybean-farm photo) reaching 0.25. That is not "borderline misses clustering just
+under the 0.15-0.25 threshold" — it's scores pinned at the noise floor, the signature of the
+model having no learned response to that visual style at all. That is the same failure
+signature Phase D observed on the user's rice photo (0 detections, confirmed not a
+tiling/scale issue).
+
+**What this settles**: the domain-mismatch explanation is no longer just plausible, it's
+reproducible on other real out-of-distribution photos using data already in this repo.
+**What it doesn't settle**: whether *that specific* rice-paddy photo would score in this same
+near-zero range — that still needs the actual file (only screenshots were ever provided). If
+the user provides it: `python -c "from app.services.yolo_detector import YOLODetector; import cv2; d=YOLODetector(); print([round(x.confidence,3) for x in d.detect(cv2.imread('PATH'), conf_threshold=0.01)])"` from `backend/`, with a score profile in this same 0.01-0.05 range confirming it definitively rather than by inference from other photos.
+
+**If pursued further**: the real fix is a rice-inclusive training set (Roboflow Universe has
+rice-paddy detection projects — see `training/README.md`'s "Pick a dataset" section), not a
+threshold tweak; lowering `conf_threshold` further would not help since these aren't
+near-threshold detections being missed, there's nothing there to threshold in.
 
 ## Key files
 
