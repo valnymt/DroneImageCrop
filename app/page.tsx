@@ -542,6 +542,18 @@ function Dashboard({ records, totals, onAnalyze, onHistory, onCompare }: { recor
     ["AVG. SIZE UNIFORMITY", avgSizeUniformity == null ? "—" : `${Math.round(avgSizeUniformity)}/100`, "stand establishment evenness", "⊞"],
   ];
 
+  // The hero card used to show hardcoded numbers (48/92/71, "94.8%",
+  // "Strong") labeled "LIVE MODEL VIEW" -- fabricated, unlike every other
+  // number in this app. records is already sorted newest-first (backend
+  // orders by desc(id)), so the 3 most recent real health scores stand in
+  // for the illustrative bounding-box badges, and the most recent
+  // analysis's own confidence/vegetation numbers drive the caption. With
+  // no history yet there is nothing real to show, so the card says so
+  // instead of inventing a number.
+  const recentForHero = records.slice(0, 3);
+  const latestForHero = records[0];
+  const vegetationSignalLabel = (score: number) => (score >= 70 ? "Strong" : score >= 40 ? "Moderate" : "Weak");
+
   const allBuckets = bucketHealthByMonth(records);
   const cutoff = period === "all" ? -Infinity : thisMonth - (Number(period) - 1);
   const buckets = allBuckets.filter((b) => b.key >= cutoff);
@@ -558,7 +570,7 @@ function Dashboard({ records, totals, onAnalyze, onHistory, onCompare }: { recor
   return <div className="page">
     <section className="hero">
       <div><span className="tag"><span className="pulse" /> LIVE CROP MONITORING</span><h2>Turn aerial imagery into<br /><em>actionable crop insight.</em></h2><p>Analyze plant populations, vegetation health, crop coverage and projected harvests—powered by computer vision.</p><div><button className="primary" onClick={onAnalyze}>Analyze drone imagery <span>→</span></button><button className="ghost" onClick={onHistory}>View recent fields</button></div><button className="hero-compare-link" onClick={onCompare}>⇄ New: compare two flights to see what changed <span>→</span></button></div>
-      <div className="field-card"><div className="field-image"><div className="scanline" /><span className="bbox b1">48</span><span className="bbox b2">92</span><span className="bbox b3">71</span><div className="map-label">◉ LIVE MODEL VIEW</div></div><div className="field-caption"><span><small>MODEL CONFIDENCE</small><b>94.8%</b></span><span><small>VEGETATION SIGNAL</small><b className="green">Strong</b></span></div></div>
+      <div className="field-card"><div className="field-image">{latestForHero && <div className="scanline" />}{recentForHero.map((r, i) => <span key={r.id} className={`bbox b${i + 1}`} title={`${r.name}: health ${Math.round(r.health_score)}/100`}>{Math.round(r.health_score)}</span>)}<div className="map-label">{latestForHero ? "◉ RECENT FIELD HEALTH" : "◉ NO ANALYSES YET"}</div></div><div className="field-caption">{latestForHero ? <><span><small>LATEST CONFIDENCE</small><b>{latestForHero.confidence_score.toFixed(1)}%</b></span><span><small>VEGETATION SIGNAL</small><b className="green">{vegetationSignalLabel(latestForHero.vegetation_score)}</b></span></> : <><span><small>LATEST CONFIDENCE</small><b>—</b></span><span><small>VEGETATION SIGNAL</small><b>—</b></span></>}</div></div>
     </section>
     <div className="section-title"><span>Portfolio performance</span><small>Updated moments ago</small></div>
     <section className="stat-grid">{stats.map(([label, value, sub, icon]) => <article className="stat" key={label}><div className="stat-icon">{icon}</div><small>{label}</small><strong>{value}</strong><p>{sub}</p></article>)}</section>
