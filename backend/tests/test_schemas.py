@@ -11,6 +11,8 @@ def make_result(**overrides):
         crop_coverage=50.0,
         vegetation_score=60.0,
         health_score=70.0,
+        texture_uniformity_score=65.0,
+        texture_pattern="uniform",
         estimated_yield=12.5,
         average_yield_per_plant_kg=0.02,
         confidence_score=80.0,
@@ -29,7 +31,9 @@ class TestAnalysisResult:
         result = make_result()
         assert result.plant_count == 10
 
-    @pytest.mark.parametrize("field", ["crop_coverage", "vegetation_score", "health_score", "confidence_score"])
+    @pytest.mark.parametrize(
+        "field", ["crop_coverage", "vegetation_score", "health_score", "texture_uniformity_score", "confidence_score"],
+    )
     def test_percentage_fields_reject_values_over_100(self, field):
         with pytest.raises(ValidationError):
             make_result(**{field: 150.0})

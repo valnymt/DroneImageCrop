@@ -16,6 +16,15 @@ class AnalysisResult(BaseModel):
     crop_coverage: float = Field(ge=0, le=100)
     vegetation_score: float = Field(ge=0, le=100)
     health_score: float = Field(ge=0, le=100)
+    # GLCM/Haralick texture uniformity of the vegetation region (see
+    # app/services/texture_analyzer.py) -- a signal color alone can't give:
+    # a uniformly discolored field (drought, nutrient deficiency) keeps a
+    # smooth/uniform texture even as its color health drops, while disease
+    # or pest damage tends to look patchy at the same color health. 50/
+    # "mixed" is the neutral default when there's too little vegetation to
+    # measure texture from at all.
+    texture_uniformity_score: float = Field(ge=0, le=100)
+    texture_pattern: str
     estimated_yield: float = Field(ge=0)
     # The per-plant yield actually used to compute estimated_yield --
     # either a caller-supplied override or the pipeline's own crop-specific

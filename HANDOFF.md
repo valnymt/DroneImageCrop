@@ -6,9 +6,9 @@ Repo: `https://github.com/valnymt/DroneImageCrop.git` (remote `origin`, on branc
 
 ## Current state
 
-Working tree is clean. Everything through Phase M is committed locally (Phases J-M are
-**3 commits ahead of `origin/main`, not yet pushed** — push when the user asks for it).
-Phase O (below) is a documentation-only revisit, no code changed.
+Working tree is clean. Everything through Phase N was pushed to `origin/main`. Phase O
+(documentation-only, no code) and Phase P (texture analysis) are committed locally, not yet
+pushed — push when the user asks for it.
 
 ## How to run it
 
@@ -107,9 +107,18 @@ successful `/analyze` call. Two independent processes; both must be running.
   the field area was actually derived (measured altitude / manual altitude / row-spacing
   estimate / unmeasured default), each color-coded high/medium/low. Directly addresses Phase
   J's tradeoff — a wrong or low-confidence AI guess now reads differently from a verified one.
+- **Phase N** — A collapsed "Adjust" link on Results lets the user correct a wrong crop-type or
+  area guess after the fact. Only `crop_density`/`estimated_yield` recalculate (via a new
+  `POST /api/recompute`, no image, no re-running YOLO/SAM/OpenCV — plant_count/coverage/health
+  don't change just because the label was wrong); reuses `YieldEstimator`'s baseline table
+  instead of duplicating it in the frontend a second time. A saved correction is shown at 100%
+  confidence, "manually corrected by you."
+- **Phase P** — Real GLCM/Haralick texture analysis (see the dedicated section above) as a
+  second signal alongside color for health scoring — distinguishes uniformly-discolored fields
+  (drought/nutrient stress) from patchy ones (disease/pest damage), which color alone can't.
 
-All of Phases A–M have real backend + frontend tests and were verified live in a browser, not
-just unit-tested (96 backend tests passing) — see individual commit-message-style descriptions
+All of Phases A–P have real backend + frontend tests and were verified live in a browser, not
+just unit-tested (110 backend tests passing) — see individual commit-message-style descriptions
 in the conversation this file came from if you need the detail.
 
 ## Phase O — Phase D zero-detection question, revisited (settled as far as it can be without the original file)
@@ -143,6 +152,46 @@ rice-paddy detection projects — see `training/README.md`'s "Pick a dataset" se
 threshold tweak; lowering `conf_threshold` further would not help since these aren't
 near-threshold detections being missed, there's nothing there to threshold in.
 
+## Phase P — GLCM/Haralick texture analysis, a real second signal beyond color
+
+Health scoring was color-only, and the project's own RGB-screening disclaimer already admitted
+it "cannot distinguish disease from drought, mature crops, harvest residue, shadows, or soil."
+`backend/app/services/texture_analyzer.py` adds a genuinely classical-CV (not deep learning)
+second signal: GLCM (gray-level co-occurrence matrix) computed via `scikit-image`, cropped to
+the vegetation region's bounding box, averaged across 3 distances × 4 angles for a
+scale/orientation-invariant reading. `homogeneity` + `energy` combine into a 0-100
+`texture_uniformity_score` and a `"uniform" | "mixed" | "patchy"` label.
+
+**Why this actually matters, not just decoration**: a uniformly discolored field (drought,
+nutrient deficiency) keeps a *smooth* texture even as color health drops — disease or pest
+damage tends to look *patchy* at the same color-based health. `pipeline.py`'s `health_score` is
+now `0.40×vegetation_score + 0.35×coverage + 0.25×texture_uniformity` (previously
+`0.55×vegetation + 0.45×coverage`, no texture input at all), and Results' recommendation text
+branches on `texture_pattern` once health drops below 80 — patchy points at "inspect specific
+irregular zones for disease/pests," uniform points at "check irrigation/nutrients field-wide."
+Verified this is a real, non-token effect: same mocked color/coverage inputs, only the actual
+image pixels differ between a uniform-texture and GLCM-patchy-noise test case, and
+`patchy_result.health_score < uniform_result.health_score` (see
+`tests/test_pipeline.py::TestTextureAffectsHealthScore`).
+
+**Scope boundary**: `texture_uniformity_score`/`texture_pattern` are on `AnalysisResult` and
+shown live on the Results screen (insight row + a texture-specific method-warning disclaimer +
+the branched recommendation) and in the PDF report, but are **not** persisted to D1 history —
+same boundary as the Phase M confidence badges, since `db/schema.ts` has no column for them and
+adding one is a schema migration, not a CV feature.
+
+10 new backend tests (7 for `TextureAnalyzer` in isolation, including that a noisy background
+*outside* the vegetation mask doesn't leak into the reading; 2 for the pipeline wiring; plus
+existing `AnalysisResult` fixtures updated for the two new required fields) — 110 backend tests
+passing total. Verified end-to-end in the browser against a real photo with genuinely irregular
+grass texture: correctly scored 23%/"patchy", visibly lowered `health_score` from what color
+alone gave it, and the recommendation text correctly switched to the disease/pest-specific
+message.
+
+Also deleted `models/yolo/classifier.pt` (was never git-tracked, never loaded by any running
+code — a leftover from the Phase A negative-result experiment; see `CLASSIFIER_EVAL_REPORT.md`
+for why it was abandoned in favor of CLIP). Nothing wires it up; don't reintroduce it.
+
 ## Key files
 
 | File | Purpose |
@@ -152,6 +201,7 @@ near-threshold detections being missed, there's nothing there to threshold in.
 | `backend/app/services/pipeline.py` | Orchestrates the CV pipeline end to end |
 | `backend/app/services/yolo_detector.py` | Detection + tiling logic |
 | `backend/app/services/opencv_processor.py` | Vegetation indices, heatmap, preprocessing |
+| `backend/app/services/texture_analyzer.py` | GLCM/Haralick texture uniformity (Phase P) |
 | `backend/app/services/sam_segmenter.py` | Box-prompted SAM refinement |
 | `backend/app/services/report_generator.py` | PDF export |
 | `backend/app/api/analysis.py` | All three HTTP endpoints |

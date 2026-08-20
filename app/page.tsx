@@ -60,6 +60,14 @@ type AnalysisResult = {
   crop_coverage: number;
   vegetation_score: number;
   health_score: number;
+  // GLCM/Haralick texture uniformity of the segmented canopy, independent
+  // of color -- lets a uniformly discolored field (drought/nutrient
+  // stress) read differently from a patchy one (disease/pest damage) at
+  // the same color-based health score. Not persisted to D1 history (see
+  // HistoryRow below) -- shown live on the just-computed Results screen
+  // only, same scope boundary as the confidence badges (Phase M).
+  texture_uniformity_score: number;
+  texture_pattern: "uniform" | "mixed" | "patchy";
   estimated_yield: number;
   // The per-plant yield the backend actually used to compute
   // estimated_yield (its own crop-specific baseline, health/coverage-
@@ -628,11 +636,21 @@ function Results({ data, file, areaUnit, onNew, onAdjust }: { data: Analysis; fi
     : data.health_score >= 55
       ? "Green crop is present, but gaps or stressed vegetation reduce the score."
       : "Low green coverage was detected, which can indicate exposed soil, sparse growth, or discolored vegetation.";
+  // Texture only changes the recommendation once health has already
+  // dropped -- a healthy field's texture pattern isn't actionable either
+  // way. Below that: patchy texture (disease/pest-shaped) and uniform
+  // texture (drought/nutrient-shaped) point at genuinely different causes
+  // for the same color-based health score, which is the whole reason
+  // texture analysis exists here rather than color alone.
   const recommendation = data.health_score >= 80
     ? "Maintain current management and compare the next flight for emerging changes."
-    : data.health_score >= 55
-      ? "Inspect bare or discolored zones for water stress, pests, disease, or establishment problems."
-      : "Prioritize a field inspection. Confirm whether the image shows drought, lodging, harvest residue, disease, or bare soil.";
+    : data.texture_pattern === "patchy"
+      ? "The patchy texture pattern in the affected areas is more consistent with disease or pest damage than a uniform stress -- inspect those irregular zones specifically, not just the low-vegetation areas overall."
+      : data.texture_pattern === "uniform"
+        ? "The texture stays uniform despite the reduced color health, which points toward a broad, even cause -- water stress, nutrient deficiency, or crop stage -- rather than disease. Check irrigation and soil conditions across the whole field."
+        : data.health_score >= 55
+          ? "Inspect bare or discolored zones for water stress, pests, disease, or establishment problems."
+          : "Prioritize a field inspection. Confirm whether the image shows drought, lodging, harvest residue, disease, or bare soil.";
 
   async function exportReport() {
     if (!file) return;
@@ -645,6 +663,8 @@ function Results({ data, file, areaUnit, onNew, onAdjust }: { data: Analysis; fi
         crop_coverage: data.crop_coverage,
         vegetation_score: data.vegetation_score,
         health_score: data.health_score,
+        texture_uniformity_score: data.texture_uniformity_score,
+        texture_pattern: data.texture_pattern,
         estimated_yield: data.estimated_yield,
         average_yield_per_plant_kg: data.average_yield_per_plant_kg,
         confidence_score: data.confidence_score,
@@ -710,7 +730,7 @@ function Results({ data, file, areaUnit, onNew, onAdjust }: { data: Analysis; fi
     </div>}
     <section className="result-metrics">{[["PLANT COUNT", data.plant_count.toLocaleString(), "detected plants"], ["CROP DENSITY", densityValue.toLocaleString(undefined, {maximumFractionDigits: 2}), densityLabel], ["CROP COVERAGE", `${data.crop_coverage}%`, "segmented area"], ["HEALTH SCORE", `${Math.round(data.health_score)}/100`, "strong vegetation"], ["EST. HARVEST", `${data.estimated_yield.toLocaleString()} kg`, `${(data.estimated_yield / 1000).toFixed(2)} metric tons`]].map(([a,b,c]) => <article key={a}><small>{a}</small><b>{b}</b><span>{c}</span></article>)}</section>
     <section className="vision-grid"><article className="panel vision-panel"><div className="panel-head"><div><h3>Computer vision output</h3><p>Detection and segmentation layers</p></div><div className="seg-tabs"><button className={tab === "detection" ? "selected" : ""} onClick={() => setTab("detection")}>Detection</button><button className={tab === "segmentation" ? "selected" : ""} onClick={() => setTab("segmentation")}>Segmentation</button><button className={tab === "heatmap" ? "selected" : ""} onClick={() => setTab("heatmap")}>Heatmap</button></div></div><div className="result-image" ref={imageContainerRef}>{tab === "detection" && data.image && <img src={data.image} alt="Analyzed crop field" />}{tab === "segmentation" && <img src={data.segmentation_overlay} alt="Segmentation mask overlay" />}{tab === "heatmap" && <img src={data.heatmap_overlay} alt="Vegetation density heatmap" />}{tab === "detection" && transform && data.detections.map((d, i) => <span key={i} className="bbox" style={{ left: d.x1 * transform.scaleX - transform.offsetX, top: d.y1 * transform.scaleY - transform.offsetY, width: (d.x2 - d.x1) * transform.scaleX, height: (d.y2 - d.y1) * transform.scaleY }}>{showBoxLabels ? `${d.label} .${Math.round(d.confidence * 100)}` : ""}</span>)}{tab === "detection" && <div className="model-badge">YOLO DETECTIONS · {data.plant_count.toLocaleString()}</div>}</div></article>
-    <article className={`panel insights health-${data.health_score >= 80 ? "good" : data.health_score >= 55 ? "mixed" : "poor"}`}><h3>Field intelligence</h3><p>Interpreted from visible RGB vegetation signals.</p><div className="score"><div className="score-ring" style={{"--score": `${data.health_score * 3.6}deg`} as React.CSSProperties}><span><b>{Math.round(data.health_score)}</b><small>/ 100</small></span></div><div><b>{healthLabel}</b><p>{healthCopy}</p></div></div><hr /><div className="insight-row"><span>GREEN VEGETATION RATIO</span><b>{data.vegetation_score.toFixed(1)}%</b></div><div className="bar"><i style={{width: `${data.vegetation_score}%`}} /></div><div className="insight-row"><span>AVG. DETECTION CONFIDENCE</span><b>{data.confidence_score.toFixed(1)}%</b></div><div className="bar"><i style={{width: `${data.confidence_score}%`}} /></div><div className="method-warning"><b>RGB screening result</b><span>Color analysis can flag suspicious areas, but cannot distinguish disease from drought, mature crops, harvest residue, shadows, or soil without field context.</span></div><div className="recommend"><b>Recommendation</b><p>{recommendation}</p></div></article></section>
+    <article className={`panel insights health-${data.health_score >= 80 ? "good" : data.health_score >= 55 ? "mixed" : "poor"}`}><h3>Field intelligence</h3><p>Interpreted from visible RGB vegetation signals.</p><div className="score"><div className="score-ring" style={{"--score": `${data.health_score * 3.6}deg`} as React.CSSProperties}><span><b>{Math.round(data.health_score)}</b><small>/ 100</small></span></div><div><b>{healthLabel}</b><p>{healthCopy}</p></div></div><hr /><div className="insight-row"><span>GREEN VEGETATION RATIO</span><b>{data.vegetation_score.toFixed(1)}%</b></div><div className="bar"><i style={{width: `${data.vegetation_score}%`}} /></div><div className="insight-row"><span>TEXTURE PATTERN</span><b>{data.texture_pattern} · {data.texture_uniformity_score.toFixed(0)}%</b></div><div className={`bar texture-${data.texture_pattern}`}><i style={{width: `${data.texture_uniformity_score}%`}} /></div><div className="insight-row"><span>AVG. DETECTION CONFIDENCE</span><b>{data.confidence_score.toFixed(1)}%</b></div><div className="bar"><i style={{width: `${data.confidence_score}%`}} /></div><div className="method-warning"><b>RGB screening result</b><span>Color analysis can flag suspicious areas, but cannot distinguish disease from drought, mature crops, harvest residue, shadows, or soil without field context.</span></div><div className="method-warning"><b>Texture screening result</b><span>GLCM/Haralick texture on the segmented canopy separates uniform condition changes (drought, nutrient stress) from patchy ones (disease, pest damage) -- it flags a pattern, not a diagnosis.</span></div><div className="recommend"><b>Recommendation</b><p>{recommendation}</p></div></article></section>
   </div>;
 }
 

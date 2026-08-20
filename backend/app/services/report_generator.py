@@ -23,6 +23,11 @@ RGB_SCREENING_DISCLAIMER = (
     "Color analysis can flag suspicious areas, but cannot distinguish disease from "
     "drought, mature crops, harvest residue, shadows, or soil without field context."
 )
+TEXTURE_DISCLAIMER = (
+    "Texture pattern (GLCM/Haralick features on the segmented canopy) separates uniform "
+    "condition changes, e.g. drought or nutrient stress, from patchy ones, e.g. disease or "
+    "pest damage -- it is not a diagnosis of which specific condition is present."
+)
 
 
 def _annotate_detections(image: np.ndarray, result: AnalysisResult) -> io.BytesIO:
@@ -140,9 +145,14 @@ def generate_report_pdf(
         Paragraph(health_copy, styles["body"]),
         Spacer(1, 0.08 * inch),
         Paragraph(f"Green vegetation ratio: {result.vegetation_score:.1f}%", styles["body"]),
+        Paragraph(
+            f"Texture pattern: {result.texture_pattern} ({result.texture_uniformity_score:.0f}/100 uniformity)",
+            styles["body"],
+        ),
         Spacer(1, 0.15 * inch),
         Paragraph("<b>RGB screening result</b>", styles["body"]),
         Paragraph(RGB_SCREENING_DISCLAIMER, styles["muted"]),
+        Paragraph(TEXTURE_DISCLAIMER, styles["muted"]),
         Spacer(1, 0.15 * inch),
         Paragraph("<b>Recommendation</b>", styles["body"]),
         Paragraph(recommendation, styles["body"]),

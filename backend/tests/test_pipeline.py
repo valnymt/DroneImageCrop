@@ -76,3 +76,41 @@ class TestPipelineSettings:
         assert preprocess_kwargs["enhance"] is False
         _, detect_kwargs = pipeline.detector.detect.call_args
         assert detect_kwargs["conf_threshold"] == 0.4
+
+
+class TestTextureAffectsHealthScore:
+    def test_patchy_texture_scores_lower_than_uniform_texture_at_same_color_health(self, tmp_path):
+        # Same vegetation/coverage color signal in both cases -- only the
+        # actual pixel texture differs (uniform green vs. real GLCM-patchy
+        # noise) -- confirms texture is a real, non-token input to
+        # health_score, not just decoration on the response.
+        path = tmp_path / "img.jpg"
+        cv2.imwrite(str(path), np.zeros((80, 80, 3), dtype=np.uint8))
+
+        uniform_pipeline = _mocked_pipeline()
+        uniform_pipeline.cv.load_and_preprocess.return_value = np.full((80, 80, 3), (60, 150, 60), dtype=np.uint8)
+        uniform_pipeline.segmenter.refine.return_value = np.full((80, 80), 255, dtype=np.uint8)
+        uniform_result = uniform_pipeline.analyze(path, "Wheat", 2.0)
+
+        rng = np.random.default_rng(0)
+        noisy = np.full((80, 80, 3), (60, 150, 60), dtype=np.uint8)
+        noise = rng.integers(-80, 80, size=noisy.shape).astype(np.int16)
+        noisy = np.clip(noisy.astype(np.int16) + noise, 0, 255).astype(np.uint8)
+        patchy_pipeline = _mocked_pipeline()
+        patchy_pipeline.cv.load_and_preprocess.return_value = noisy
+        patchy_pipeline.segmenter.refine.return_value = np.full((80, 80), 255, dtype=np.uint8)
+        patchy_result = patchy_pipeline.analyze(path, "Wheat", 2.0)
+
+        assert uniform_result.texture_pattern == "uniform"
+        assert patchy_result.texture_pattern == "patchy"
+        assert patchy_result.health_score < uniform_result.health_score
+
+    def test_texture_fields_present_on_result(self, tmp_path):
+        pipeline = _mocked_pipeline()
+        path = tmp_path / "img.jpg"
+        cv2.imwrite(str(path), np.zeros((50, 50, 3), dtype=np.uint8))
+
+        result = pipeline.analyze(path, "Wheat", 2.0)
+
+        assert result.texture_pattern == "mixed"  # empty mask -> neutral default
+        assert result.texture_uniformity_score == 50.0

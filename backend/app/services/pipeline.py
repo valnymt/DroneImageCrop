@@ -7,6 +7,7 @@ from app.services.image_encoding import encode_png_data_url
 from app.services.opencv_processor import OpenCVProcessor
 from app.services.sam_segmenter import SAMSegmenter
 from app.services.schemas import AnalysisResult
+from app.services.texture_analyzer import TextureAnalyzer
 from app.services.yield_estimator import YieldEstimator
 from app.services.yolo_detector import CONF_THRESHOLD, YOLODetector
 
@@ -33,6 +34,7 @@ class CropAnalysisPipeline:
         self.cv = OpenCVProcessor()
         self.detector = YOLODetector()
         self.segmenter = SAMSegmenter()
+        self.texture = TextureAnalyzer()
         self.yield_estimator = YieldEstimator()
 
     def analyze(
@@ -56,17 +58,27 @@ class CropAnalysisPipeline:
             else vegetation.green_mask
         )
         confidence = 100 * sum(d.confidence for d in detections) / max(plant_count, 1)
+        crop_coverage = round(100 * (refined_mask > 0).mean(), 2)
+        texture = self.texture.analyze(image, refined_mask)
+        # Texture gets a real (not token) weight: two fields at the same
+        # color health can still mean very different things -- a uniformly
+        # discolored field (drought, nutrient deficiency) keeps a smooth
+        # texture, while disease or pest damage tends to look patchy at
+        # the same color health. health_score alone can't separate those;
+        # texture_pattern (surfaced separately on AnalysisResult) is what
+        # actually distinguishes them for the caller.
+        health = round(min(100, 0.40 * vegetation.vegetation_score + 0.35 * crop_coverage + 0.25 * texture.uniformity_score), 2)
         per_plant_kg = self.yield_estimator.resolve_per_plant_kg(crop, average_kg)
-        estimated = self.yield_estimator.estimate(
-            plant_count, crop, vegetation.coverage_percent, vegetation.health_score, average_kg
-        )
+        estimated = self.yield_estimator.estimate(plant_count, crop, crop_coverage, health, average_kg)
         h, w = image.shape[:2]
         return AnalysisResult(
             plant_count=plant_count,
             crop_density=round(plant_count / area_ha, 2),
-            crop_coverage=round(100 * (refined_mask > 0).mean(), 2),
+            crop_coverage=crop_coverage,
             vegetation_score=vegetation.vegetation_score,
-            health_score=vegetation.health_score,
+            health_score=health,
+            texture_uniformity_score=texture.uniformity_score,
+            texture_pattern=texture.pattern,
             estimated_yield=estimated,
             average_yield_per_plant_kg=round(per_plant_kg, 3),
             confidence_score=round(confidence, 2),

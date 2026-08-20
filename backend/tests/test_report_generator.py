@@ -12,6 +12,8 @@ def make_result(**overrides) -> AnalysisResult:
         crop_coverage=54.2,
         vegetation_score=61.0,
         health_score=58.0,
+        texture_uniformity_score=60.0,
+        texture_pattern="mixed",
         estimated_yield=2.16,
         average_yield_per_plant_kg=0.18,
         confidence_score=71.4,
