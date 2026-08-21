@@ -7,8 +7,11 @@ Repo: `https://github.com/valnymt/DroneImageCrop.git` (remote `origin`, on branc
 ## Current state
 
 Working tree is clean. Everything through Phase T (and the Dashboard-hero-fabricated-data fix
-right after it) was pushed to `origin/main`. Phase U (open-vocabulary detection fallback) is
-committed locally, not yet pushed — push when the user asks.
+right after it) was pushed to `origin/main`. Phase U (open-vocabulary detection fallback) and
+Phase V (retrained YOLO checkpoint on a merged dataset -- see below) are committed locally, not
+yet pushed — push when the user asks. **Phase V also deployed a new `models/yolo/best.pt`**
+(binary, gitignored, not something `git push` affects) -- see its section for details and the
+rollback path if ever needed.
 
 **Local D1 migration applied**: `drizzle/0001_glamorous_daredevil.sql` has been run against the
 local `.wrangler` D1 state already (via `npm run db:migrate:local`). If this repo is cloned
@@ -407,6 +410,48 @@ plant_count throughout Phases D/O now returns `detection_method: "general_fallba
 detection with a full explanation, confirmed rendering correctly in the browser (relabeled
 badge, warning box, correct bounding box on the actual image) -- then confirmed the
 in-distribution path is unaffected (still `"fine_tuned"`, no fallback triggered, same speed).
+
+## Phase V — retrained the YOLO checkpoint on a merged dataset (real fix, not a workaround)
+
+The user explicitly asked for the actual fix to detection generalization, not just the Phase U
+fallback. Found a genuine, previously-undiscovered defect while investigating: the current
+checkpoint's own validation set has **zero training instances of the "weed" class** (see
+`training/EVAL_REPORT.md`) -- it had structurally never seen a real weed and could not have
+learned to recognize one. Found and merged in `Project-AgML/crop_weed_detection_latvia`
+(HuggingFace, CC-BY-4.0, no Roboflow key needed) -- 1,176 images, 7,442 real weed + 410 crop
+annotations, mapped directly onto the existing class scheme. Training set: 823 -> 1,646 images.
+
+Retrained 25 epochs on CPU (no GPU available -- ~22 min/epoch, ~7.6 hours total). Full details,
+the apples-to-apples before/after numbers, and the honest out-of-distribution caveat are in
+`training/EVAL_REPORT.md`'s "Phase V" section -- summary:
+
+- **Same validation set, both checkpoints**: overall mAP50 0.205 -> 0.746, weed class mAP50
+  0.000 (never learned) -> 0.762. Every class, every metric, improved -- this part is not close.
+- **True out-of-distribution photos (the Phase O/U diagnostic, rerun)**: mixed, not a clean win
+  -- some scores improved, some got worse. This was never going to fully solve open-domain
+  generalization from ~2,400 more images, and it doesn't. But critically, **none of these scores
+  clear the deployed 0.25 confidence threshold either before or after** -- so real production
+  behavior on these specific photos is unchanged (0 detections -> Phase U's fallback triggers
+  either way). The retrain and the fallback fix two different, both-real problems; neither
+  replaces the other.
+
+**Two real process mistakes during this, corrected in front of the user rather than hidden**:
+(1) the first training attempt was launched with `nohup ... & disown` at the shell level, which
+does not survive between tool-call turns in this environment -- it died silently after 4 minutes
+with no error and no checkpoint saved. Relaunched using the tool's actual `run_in_background`
+mechanism, which is harness-tracked and does survive. (2) The user needed to shut their machine
+down partway through (19/25 epochs done); confirmed `last.pt` was written by Ultralytics after
+every completed epoch (not continuously), so stopping mid-epoch-20 was safe, then resumed
+cleanly later with `model.train(resume=True)` from that checkpoint -- verified in the log that
+it said "Resuming ... from epoch 20 to 25", not restarting from scratch.
+
+**Deployed**: `models/yolo/best.pt` now points at the new checkpoint (verified via the real
+`YOLODetector` class and a live `/api/analyze` call, not just the raw Ultralytics model). The
+prior checkpoint is preserved at `models/yolo/best.pt.pre-latvia-retrain.bak` for rollback --
+`.pt` files are gitignored, so this backup is local-disk-only, not something `git` tracks.
+`backend/training/merge_latvia_dataset.py` is the (idempotent-ish; re-running would re-add the
+same images under the same filenames and overwrite) script that did the merge, kept for
+reproducibility. 169/169 backend tests still pass with the new checkpoint deployed.
 
 ## Key files
 
