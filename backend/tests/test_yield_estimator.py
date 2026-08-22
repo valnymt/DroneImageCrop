@@ -1,6 +1,15 @@
 import pytest
 
+from app.services.plant_size_analyzer import PlantSizeStats
 from app.services.yield_estimator import YieldEstimator
+
+
+def _size_stats(mean_area_cm2: float) -> PlantSizeStats:
+    return PlantSizeStats(
+        plant_count=10, mean_area_cm2=mean_area_cm2, median_area_cm2=mean_area_cm2,
+        min_area_cm2=mean_area_cm2, max_area_cm2=mean_area_cm2, mean_aspect_ratio=1.1,
+        size_uniformity_score=80.0,
+    )
 
 
 @pytest.fixture
@@ -70,3 +79,66 @@ class TestEstimate:
         sickly = estimator.estimate(plant_count=200, crop_type="soybean", coverage=30, health=25)
         thriving = estimator.estimate(plant_count=200, crop_type="soybean", coverage=95, health=90)
         assert thriving > sickly
+
+    def test_no_size_stats_leaves_estimate_unchanged_from_pre_size_behavior(self, estimator):
+        # Backward compatibility: every caller that doesn't pass
+        # plant_size_stats/area_ha (e.g. /recompute, which never re-runs
+        # segmentation) must get exactly the old flat-per-plant number.
+        without_size = estimator.estimate(plant_count=100, crop_type="corn", coverage=80, health=70, average_kg=0.2)
+        with_no_area = estimator.estimate(
+            plant_count=100, crop_type="corn", coverage=80, health=70, average_kg=0.2,
+            plant_size_stats=_size_stats(500), area_ha=None,
+        )
+        assert without_size == with_no_area
+
+
+class TestSizeAdjustment:
+    def test_no_size_stats_gives_neutral_factor_and_no_note(self, estimator):
+        factor, note = estimator.size_adjustment(None, plant_count=100, area_ha=1.0)
+        assert factor == 1.0
+        assert note is None
+
+    def test_zero_plant_count_gives_neutral_factor(self, estimator):
+        factor, note = estimator.size_adjustment(_size_stats(500), plant_count=0, area_ha=1.0)
+        assert factor == 1.0
+        assert note is None
+
+    def test_missing_area_gives_neutral_factor(self, estimator):
+        factor, note = estimator.size_adjustment(_size_stats(500), plant_count=100, area_ha=None)
+        assert factor == 1.0
+        assert note is None
+
+    def test_plants_bigger_than_their_allotted_spacing_nudge_factor_up(self, estimator):
+        # 1 hectare = 1e8 cm^2; split across 100 plants -> 1,000,000 cm^2
+        # allotted per plant. A measured 4,000,000 cm^2 canopy is 4x that.
+        factor, note = estimator.size_adjustment(_size_stats(4_000_000), plant_count=100, area_ha=1.0)
+        assert factor > 1.0
+        assert note is not None
+        assert "nudged up" in note
+
+    def test_plants_smaller_than_their_allotted_spacing_nudge_factor_down(self, estimator):
+        factor, note = estimator.size_adjustment(_size_stats(100_000), plant_count=100, area_ha=1.0)
+        assert factor < 1.0
+        assert note is not None
+        assert "nudged down" in note
+
+    def test_factor_is_bounded_even_for_extreme_fill_ratios(self, estimator):
+        huge, _ = estimator.size_adjustment(_size_stats(10_000_000), plant_count=100, area_ha=1.0)
+        tiny, _ = estimator.size_adjustment(_size_stats(0.001), plant_count=100, area_ha=1.0)
+        assert huge == YieldEstimator.SIZE_FACTOR_MAX
+        assert tiny == YieldEstimator.SIZE_FACTOR_MIN
+
+    def test_typical_fill_ratio_gives_no_note(self, estimator):
+        # Canopy area matching the allotted spacing almost exactly shouldn't
+        # be reported as a meaningful adjustment.
+        factor, note = estimator.size_adjustment(_size_stats(1_000_000), plant_count=100, area_ha=1.0)
+        assert factor == pytest.approx(1.0, abs=0.05)
+        assert note is None
+
+    def test_estimate_applies_the_size_factor_to_the_final_number(self, estimator):
+        base = estimator.estimate(plant_count=100, crop_type="corn", coverage=80, health=70, average_kg=0.2)
+        bigger_plants = estimator.estimate(
+            plant_count=100, crop_type="corn", coverage=80, health=70, average_kg=0.2,
+            plant_size_stats=_size_stats(4_000_000), area_ha=1.0,
+        )
+        assert bigger_plants > base

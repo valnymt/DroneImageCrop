@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
-type View = "dashboard" | "analyze" | "results" | "history" | "compare" | "settings";
+type View = "dashboard" | "analyze" | "results" | "history" | "compare" | "mosaic" | "settings";
 
 type Settings = {
   areaUnit: "ha" | "acres";
@@ -106,6 +106,13 @@ type AnalysisResult = {
   // estimated_yield (its own crop-specific baseline, health/coverage-
   // adjusted) -- not a value this app invents; persisted to history as-is.
   average_yield_per_plant_kg: number;
+  // How much estimated_yield was nudged by each plant's own measured
+  // canopy size vs. the flat per-plant baseline (see backend's
+  // YieldEstimator.size_adjustment) -- 1.0 when there was nothing to
+  // measure it from. A heuristic, not a calibrated biomass reading;
+  // yield_size_note explains why whenever it moved meaningfully.
+  yield_size_factor: number;
+  yield_size_note: string | null;
   confidence_score: number;
   detections: Detection[];
   // Pixel space `detections` coordinates are relative to -- the backend's
@@ -125,6 +132,13 @@ type InspectResult = {
   confidence: number;
   estimated_area_hectares: number | null;
   area_source: string;
+  // A real range on estimated_area_hectares (see backend's
+  // field_area_estimator.AREA_CONFIDENCE), not the point value alone --
+  // both null when that source's error is structurally unbounded (see
+  // AREA_SOURCE_INFO's exif_gps_altitude entry) or no estimate exists.
+  area_low_hectares: number | null;
+  area_high_hectares: number | null;
+  area_confidence: "high" | "medium" | "low";
 };
 
 type SessionMeta = {
@@ -139,6 +153,8 @@ type SessionMeta = {
   // itself worth showing as "not verified" rather than hiding.
   cropConfidence: number | null;
   areaSource: string | null;
+  areaLowHectares: number | null;
+  areaHighHectares: number | null;
 };
 
 type Analysis = AnalysisResult & SessionMeta & { id: number };
@@ -279,6 +295,7 @@ const nav = [
   ["analyze", "⌁", "New analysis"],
   ["history", "▤", "Field history"],
   ["compare", "⇄", "Compare flights"],
+  ["mosaic", "▦", "Field mosaic"],
   ["settings", "⚙", "Settings"],
 ] as const;
 
@@ -303,6 +320,8 @@ export default function Home() {
   // photo -- only then does the UI ask for the one last-resort field
   // (flight altitude) instead of silently keeping the stale default area.
   const [areaSource, setAreaSource] = useState<string | null>(null);
+  const [areaLowHectares, setAreaLowHectares] = useState<number | null>(null);
+  const [areaHighHectares, setAreaHighHectares] = useState<number | null>(null);
   const [manualAltitude, setManualAltitude] = useState("");
   // CLIP's own confidence in its crop-type guess (0-100) -- surfaced in
   // Results (Phase M) so a low-confidence guess is visibly flagged rather
@@ -367,6 +386,8 @@ export default function Home() {
     setCropSuggested(false);
     setAreaSuggested(false);
     setAreaSource(null);
+    setAreaLowHectares(null);
+    setAreaHighHectares(null);
     setManualAltitude("");
     setCropConfidence(null);
     inspectPromiseRef.current = inspectImage(f);
@@ -388,6 +409,8 @@ export default function Home() {
       if (SUPPORTED_CROPS.includes(result.crop_type)) applyCrop(result.crop_type, true);
       if (result.estimated_area_hectares != null) applyArea(String(result.estimated_area_hectares), true);
       setAreaSource(result.area_source);
+      setAreaLowHectares(result.area_low_hectares);
+      setAreaHighHectares(result.area_high_hectares);
       setCropConfidence(result.confidence);
     } catch {
       // Best-effort only: network error, timeout/abort, or the backend
@@ -441,6 +464,8 @@ export default function Home() {
         fieldAreaHectares: Number(area),
         cropConfidence,
         areaSource,
+        areaLowHectares,
+        areaHighHectares,
       };
       const analysis: Analysis = { id: Date.now(), ...result, ...meta };
       setLatest(analysis);
@@ -499,13 +524,14 @@ export default function Home() {
       </aside>
 
       <section className="content">
-        <header><div><span className="eyebrow">DRONE CROP INTELLIGENCE</span><h1>{view === "dashboard" ? "Field overview" : view === "analyze" ? "Analyze a field" : view === "results" ? "Analysis complete" : view === "history" ? "Field history" : view === "compare" ? "Compare flights" : "System settings"}</h1></div><div className="header-actions"><button className="icon-btn">?</button><button className="icon-btn">♢</button><button className="primary compact" onClick={() => setView("analyze")}>＋ New analysis</button></div></header>
+        <header><div><span className="eyebrow">DRONE CROP INTELLIGENCE</span><h1>{view === "dashboard" ? "Field overview" : view === "analyze" ? "Analyze a field" : view === "results" ? "Analysis complete" : view === "history" ? "Field history" : view === "compare" ? "Compare flights" : view === "mosaic" ? "Field mosaic" : "System settings"}</h1></div><div className="header-actions"><button className="icon-btn">?</button><button className="icon-btn">♢</button><button className="primary compact" onClick={() => setView("analyze")}>＋ New analysis</button></div></header>
 
         {view === "dashboard" && <Dashboard records={records} totals={totals} onAnalyze={() => setView("analyze")} onHistory={() => setView("history")} onCompare={() => setView("compare")} />}
         {view === "analyze" && <Upload file={file} preview={preview} fieldName={fieldName} crop={crop} area={area} analyzing={analyzing} error={analyzeError} inspecting={inspecting} cropSuggested={cropSuggested} areaSuggested={areaSuggested} areaSource={areaSource} manualAltitude={manualAltitude} setManualAltitude={setManualAltitude} onEstimateAltitude={estimateWithManualAltitude} areaUnit={settings.areaUnit} inputRef={inputRef} onFile={chooseFile} setFieldName={setFieldName} run={runAnalysis} />}
         {view === "results" && latest && <Results data={latest} file={file} areaUnit={settings.areaUnit} onNew={() => setView("analyze")} onAdjust={(patch) => setLatest((prev) => prev ? { ...prev, ...patch } : prev)} />}
         {view === "history" && <History records={records} loading={historyLoading} error={historyError} onRetry={fetchHistory} areaUnit={settings.areaUnit} />}
         {view === "compare" && <Compare />}
+        {view === "mosaic" && <Mosaic />}
         {view === "settings" && <Settings settings={settings} onSave={saveSettings} />}
       </section>
     </main>
@@ -613,8 +639,15 @@ function Upload(p: any) {
 // in Results so a fallback/default estimate reads differently from a real
 // measurement, instead of both looking equally authoritative.
 const AREA_SOURCE_INFO: Record<string, { label: string; tier: "high" | "medium" | "low" }> = {
-  exif_gps_altitude: { label: "measured from the photo's GPS altitude", tier: "high" },
-  exif_gps_altitude_default_focal: { label: "measured from GPS altitude (assumed lens)", tier: "medium" },
+  // Demoted from "high": standard EXIF GPSAltitude is height above/below
+  // MEAN SEA LEVEL, not the drone's height above the ground it
+  // photographed -- a field sitting at real elevation gets its area badly
+  // wrong (see backend's field_area_estimator.AREA_CONFIDENCE for the
+  // exact failure mode), and there's no ground-elevation data here to
+  // correct for it. This now reads as unreliable, not equal to the
+  // genuinely-measured XMP/manual paths it used to look identical to.
+  exif_gps_altitude: { label: "estimated from the photo's GPS altitude (unreliable — see note below)", tier: "low" },
+  exif_gps_altitude_default_focal: { label: "estimated from GPS altitude and an assumed lens (unreliable — see note below)", tier: "low" },
   xmp_relative_altitude: { label: "measured from the drone's recorded flight altitude", tier: "high" },
   xmp_relative_altitude_default_focal: { label: "measured from flight altitude (assumed lens)", tier: "medium" },
   manual_altitude: { label: "calculated from the altitude you entered", tier: "high" },
@@ -632,7 +665,7 @@ function confidenceTier(confidence: number | null): "high" | "medium" | "low" {
   return "low";
 }
 
-type ResultsPatch = Pick<Analysis, "crop" | "fieldAreaHectares" | "crop_density" | "estimated_yield" | "average_yield_per_plant_kg" | "cropConfidence" | "areaSource">;
+type ResultsPatch = Pick<Analysis, "crop" | "fieldAreaHectares" | "crop_density" | "estimated_yield" | "average_yield_per_plant_kg" | "cropConfidence" | "areaSource" | "areaLowHectares" | "areaHighHectares">;
 
 function Results({ data, file, areaUnit, onNew, onAdjust }: { data: Analysis; file: File | null; areaUnit: "ha" | "acres"; onNew: () => void; onAdjust: (patch: ResultsPatch) => void }) {
   const cropTier = confidenceTier(data.cropConfidence);
@@ -640,7 +673,15 @@ function Results({ data, file, areaUnit, onNew, onAdjust }: { data: Analysis; fi
   // No entry in AREA_SOURCE_INFO means "unavailable" (or inspection never
   // completed) -- area is a plain default, never measured from this photo.
   const areaTier = areaInfo?.tier ?? "low";
-  const areaLabel = areaInfo?.label ?? "not measured from this photo — default estimate";
+  // The range comes straight from the backend's own analysis of how
+  // sensitive its area formula is to that source's weakest assumption
+  // (see field_area_estimator.AREA_CONFIDENCE) -- not a fabricated
+  // +/-X% slapped on afterward. Null for sources with no defensible
+  // numeric range (e.g. GPS-altitude paths, see the label itself).
+  const areaRange = data.areaLowHectares != null && data.areaHighHectares != null
+    ? ` (roughly ${data.areaLowHectares.toLocaleString(undefined, {maximumFractionDigits: 2})}–${data.areaHighHectares.toLocaleString(undefined, {maximumFractionDigits: 2})} ha)`
+    : "";
+  const areaLabel = (areaInfo?.label ?? "not measured from this photo — default estimate") + areaRange;
   const [adjustOpen, setAdjustOpen] = useState(false);
   const [draftCrop, setDraftCrop] = useState(data.crop);
   const [draftArea, setDraftArea] = useState(String(data.fieldAreaHectares));
@@ -681,6 +722,8 @@ function Results({ data, file, areaUnit, onNew, onAdjust }: { data: Analysis; fi
         // user just knows better.
         cropConfidence: 100,
         areaSource: "manual_override",
+        areaLowHectares: null,
+        areaHighHectares: null,
       });
       setAdjustOpen(false);
     } catch (err) {
@@ -761,6 +804,8 @@ function Results({ data, file, areaUnit, onNew, onAdjust }: { data: Analysis; fi
         plant_size_stats: data.plant_size_stats,
         estimated_yield: data.estimated_yield,
         average_yield_per_plant_kg: data.average_yield_per_plant_kg,
+        yield_size_factor: data.yield_size_factor,
+        yield_size_note: data.yield_size_note,
         confidence_score: data.confidence_score,
         detections: data.detections,
         image_width: data.image_width,
@@ -829,7 +874,8 @@ function Results({ data, file, areaUnit, onNew, onAdjust }: { data: Analysis; fi
         <button type="button" className="primary compact" onClick={saveAdjust} disabled={adjusting || !draftCrop || Number(draftArea) <= 0}>{adjusting ? <><span className="spinner" /> Recalculating…</> : "Save correction"}</button>
       </div>
     </div>}
-    <section className="result-metrics">{[["PLANT COUNT", data.plant_count.toLocaleString(), "detected plants"], ["CROP DENSITY", densityValue.toLocaleString(undefined, {maximumFractionDigits: 2}), densityLabel], ["CROP COVERAGE", `${data.crop_coverage}%`, "segmented area"], ["HEALTH SCORE", `${Math.round(data.health_score)}/100`, "strong vegetation"], ["EST. HARVEST", `${data.estimated_yield.toLocaleString()} kg`, `${(data.estimated_yield / 1000).toFixed(2)} metric tons`]].map(([a,b,c]) => <article key={a}><small>{a}</small><b>{b}</b><span>{c}</span></article>)}</section>
+    <section className="result-metrics">{[["PLANT COUNT", data.plant_count.toLocaleString(), "detected plants"], ["CROP DENSITY", densityValue.toLocaleString(undefined, {maximumFractionDigits: 2}), densityLabel], ["CROP COVERAGE", `${data.crop_coverage}%`, "segmented area"], ["HEALTH SCORE", `${Math.round(data.health_score)}/100`, "strong vegetation"], ["EST. HARVEST", `${data.estimated_yield.toLocaleString()} kg`, `${(data.estimated_yield / 1000).toFixed(2)} metric tons${data.yield_size_factor !== 1 ? ` · size-adjusted ${data.yield_size_factor.toFixed(2)}×` : ""}`]].map(([a,b,c]) => <article key={a}><small>{a}</small><b>{b}</b><span>{c}</span></article>)}</section>
+    <div className="method-warning" style={{margin: "0 0 18px"}}><b>Yield estimate</b><span>{data.yield_size_note ?? "A rough approximation: detected plants × a typical per-plant weight for this crop, adjusted for measured field coverage and health. Not a calibrated biomass model -- treat it as an order-of-magnitude planning number, not a harvest weigh-in."}</span></div>
     <section className="vision-grid"><article className="panel vision-panel"><div className="panel-head"><div><h3>Computer vision output</h3><p>Detection and segmentation layers{data.tilt_corrected ? " · perspective corrected" : ""}{data.detection_method === "general_fallback" ? " · general-purpose detector used" : ""}</p></div><div className="seg-tabs"><button className={tab === "detection" ? "selected" : ""} onClick={() => setTab("detection")}>Detection</button><button className={tab === "segmentation" ? "selected" : ""} onClick={() => setTab("segmentation")}>Segmentation</button><button className={tab === "heatmap" ? "selected" : ""} onClick={() => setTab("heatmap")}>Heatmap</button></div></div><div className="result-image" ref={imageContainerRef}>{tab === "detection" && (data.analyzed_image ?? data.image) && <img src={data.analyzed_image ?? data.image} alt="Analyzed crop field" />}{tab === "segmentation" && <img src={data.segmentation_overlay} alt="Segmentation mask overlay" />}{tab === "heatmap" && <img src={data.heatmap_overlay} alt="Vegetation density heatmap" />}{tab === "detection" && transform && data.detections.map((d, i) => <span key={i} className="bbox" style={{ left: d.x1 * transform.scaleX - transform.offsetX, top: d.y1 * transform.scaleY - transform.offsetY, width: (d.x2 - d.x1) * transform.scaleX, height: (d.y2 - d.y1) * transform.scaleY }}>{showBoxLabels ? `${d.label} .${Math.round(d.confidence * 100)}` : ""}</span>)}{tab === "detection" && <div className="model-badge">{data.detection_method === "general_fallback" ? "GENERAL DETECTOR" : "YOLO DETECTIONS"} · {data.plant_count.toLocaleString()}</div>}{tab === "detection" && data.tilt_corrected && <div className="model-badge tilt-badge">⇕ TILT CORRECTED</div>}</div>{data.detection_method === "general_fallback" && <div className="method-warning" style={{margin: 16}}><b>⚠ General-purpose detector used</b><span>{data.detection_note}</span></div>}</article>
     <article className={`panel insights health-${data.health_score >= 80 ? "good" : data.health_score >= 55 ? "mixed" : "poor"}`}><h3>Field intelligence</h3><p>Interpreted from visible RGB vegetation signals.</p><div className="score"><div className="score-ring" style={{"--score": `${data.health_score * 3.6}deg`} as React.CSSProperties}><span><b>{Math.round(data.health_score)}</b><small>/ 100</small></span></div><div><b>{healthLabel}</b><p>{healthCopy}</p></div></div><hr /><div className="insight-row"><span>GREEN VEGETATION RATIO</span><b>{data.vegetation_score.toFixed(1)}%</b></div><div className="bar"><i style={{width: `${data.vegetation_score}%`}} /></div><div className="insight-row"><span>TEXTURE PATTERN</span><b>{data.texture_pattern} · {data.texture_uniformity_score.toFixed(0)}%</b></div><div className={`bar texture-${data.texture_pattern}`}><i style={{width: `${data.texture_uniformity_score}%`}} /></div><div className="insight-row"><span>AVG. DETECTION CONFIDENCE</span><b>{data.confidence_score.toFixed(1)}%</b></div><div className="bar"><i style={{width: `${data.confidence_score}%`}} /></div><div className="method-warning"><b>RGB screening result</b><span>Color analysis can flag suspicious areas, but cannot distinguish disease from drought, mature crops, harvest residue, shadows, or soil without field context.</span></div><div className="method-warning"><b>Texture screening result</b><span>GLCM/Haralick texture on the segmented canopy separates uniform condition changes (drought, nutrient stress) from patchy ones (disease, pest damage) -- it flags a pattern, not a diagnosis.</span></div><div className="recommend"><b>Recommendation</b><p>{recommendation}</p></div></article></section>
     {data.plant_size_stats && <section className="panel plant-size-panel"><h3>Per-plant size &amp; shape</h3><p>Measured from SAM's own per-plant masks, not just plant count -- a second axis of analysis independent of health/texture.</p>
@@ -876,6 +922,9 @@ type ComparisonResult = {
   loss_percent: number;
   unchanged_percent: number;
   diff_overlay: string;
+  texture_uniformity_before: number | null;
+  texture_uniformity_after: number | null;
+  texture_shift_note: string | null;
   warning: string | null;
 };
 
@@ -950,9 +999,89 @@ function Compare() {
         <div className="insight-row"><span>NEW GROWTH</span><b>{result.growth_percent.toFixed(1)}%</b></div><div className="bar"><i style={{width: `${result.growth_percent}%`, background: "#2f704c"}} /></div>
         <div className="insight-row"><span>VEGETATION LOST</span><b>{result.loss_percent.toFixed(1)}%</b></div><div className="bar"><i style={{width: `${result.loss_percent}%`, background: "#b64c3c"}} /></div>
         <div className="insight-row"><span>UNCHANGED</span><b>{result.unchanged_percent.toFixed(1)}%</b></div><div className="bar"><i style={{width: `${result.unchanged_percent}%`}} /></div>
+        {result.texture_shift_note && <div className="method-warning"><b>Canopy texture</b><span>{result.texture_uniformity_before != null && result.texture_uniformity_after != null && <>{Math.round(result.texture_uniformity_before)} → {Math.round(result.texture_uniformity_after)}/100 uniformity. </>}{result.texture_shift_note}</span></div>}
         <div className="method-warning"><b>Alignment method</b><span>ORB keypoints + RANSAC homography. {result.keypoints_matched} inlier matches at {result.inlier_ratio.toFixed(0)}% agreement -- higher agreement means the alignment (and therefore the diff) is more trustworthy.</span></div>
       </article>
     </section>}
+  </div>;
+}
+
+type MosaicApiResult = {
+  success: boolean;
+  mosaic: string | null;
+  images_used: number;
+  images_submitted: number;
+  warning: string | null;
+};
+
+const MOSAIC_MIN_IMAGES = 2;
+const MOSAIC_MAX_IMAGES = 12;
+
+function Mosaic() {
+  const [files, setFiles] = useState<{ file: File; preview: string }[]>([]);
+  const [stitching, setStitching] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<MosaicApiResult | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  function addFiles(fileList: FileList | File[] | null) {
+    if (!fileList) return;
+    const picked = Array.from(fileList).filter((f) => f.type.startsWith("image/"));
+    if (!picked.length) return;
+    setResult(null);
+    setError(null);
+    setFiles((prev) => [...prev, ...picked.map((file) => ({ file, preview: URL.createObjectURL(file) }))].slice(0, MOSAIC_MAX_IMAGES));
+  }
+
+  function removeFile(index: number) {
+    setResult(null);
+    setFiles((prev) => prev.filter((_, i) => i !== index));
+  }
+
+  async function runStitch() {
+    if (files.length < MOSAIC_MIN_IMAGES) return;
+    setStitching(true);
+    setError(null);
+    setResult(null);
+    try {
+      const formData = new FormData();
+      files.forEach(({ file }) => formData.append("images", file));
+      const res = await fetch(`${API_BASE}/api/mosaic`, { method: "POST", body: formData });
+      if (!res.ok) throw new Error(await parseError(res, `Stitching failed (${res.status}).`));
+      setResult(await res.json());
+    } catch (err) {
+      setError(err instanceof TypeError ? NETWORK_ERROR : err instanceof Error ? err.message : "Stitching failed.");
+    } finally {
+      setStitching(false);
+    }
+  }
+
+  return <div className="page narrow">
+    <article className="panel upload-panel">
+      <h3>Overlapping field photos</h3>
+      <p>Upload 2–{MOSAIC_MAX_IMAGES} photos of the same field with real visual overlap between neighbors -- they'll be stitched into one wider composite.</p>
+      <div className="dropzone" onClick={() => inputRef.current?.click()} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); addFiles(e.dataTransfer.files); }} style={{height: 180}}>
+        <div className="upload-icon">↥</div><b>Drop photos here</b><span>or click to browse -- select multiple at once</span>
+        <input ref={inputRef} hidden type="file" accept="image/png,image/jpeg" multiple onChange={(e) => addFiles(e.target.files)} />
+      </div>
+      {files.length > 0 && <div className="file-pill" style={{flexWrap: "wrap", gap: 10, alignItems: "flex-start"}}>
+        {files.map(({ preview }, i) => <div key={i} style={{position: "relative"}}>
+          <img src={preview} alt={`Field photo ${i + 1}`} style={{width: 64, height: 64, objectFit: "cover", border: "1px solid var(--line)"}} />
+          <button type="button" onClick={() => removeFile(i)} style={{position: "absolute", top: -8, right: -8, width: 20, height: 20, borderRadius: "50%", border: "1px solid var(--line)", background: "white", padding: 0, lineHeight: 1}}>×</button>
+        </div>)}
+      </div>}
+    </article>
+    <div className="tech-note"><b>▦ How this works</b><span>OpenCV's multi-image stitcher (feature matching, bundle adjustment, seam blending) aligns and blends all the photos into one composite. This is a real algorithmic stitch, not a georeferenced orthomosaic -- there's no GPS/elevation data here to tie any pixel to a real-world coordinate, so it's useful for seeing more of a field at once, not for surveying it.</span></div>
+    {error && <div className="tech-note error-note"><b>⚠ Stitching failed</b><span>{error}</span></div>}
+    <button className="primary full" disabled={files.length < MOSAIC_MIN_IMAGES || stitching} onClick={runStitch}>{stitching ? <><span className="spinner" /> Stitching {files.length} photos…</> : <>Stitch {files.length || ""} photos <span>→</span></>}</button>
+
+    {result && !result.success && <div className="tech-note error-note" style={{marginTop: 18}}><b>⚠ Couldn't stitch these photos</b><span>{result.warning ?? "The photos could not be aligned into a mosaic."}</span></div>}
+
+    {result && result.success && result.mosaic && <article className="panel vision-panel" style={{marginTop: 18}}>
+      <div className="panel-head"><div><h3>Stitched mosaic</h3><p>{result.images_used} of {result.images_submitted} photos used</p></div></div>
+      <div className="result-image" style={{height: "auto"}}><img src={result.mosaic} alt="Stitched field mosaic" style={{width: "100%", height: "auto", display: "block"}} /></div>
+      <div className="method-warning" style={{margin: 16}}><b>Not a georeferenced orthomosaic</b><span>This composite has no absolute real-world coordinates -- it's aligned in the first photo's own relative pixel space using visual feature matching only. Don't use it for area measurement or precise field mapping.</span></div>
+    </article>}
   </div>;
 }
 

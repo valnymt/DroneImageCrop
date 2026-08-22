@@ -5,9 +5,11 @@ import pytest
 from PIL import ExifTags, Image
 
 from app.services.field_area_estimator import (
+    AREA_CONFIDENCE,
     DEFAULT_FOCAL_LENGTH_35MM_MM,
     ROW_SPACING_METERS,
     SENSOR_WIDTH_35MM_MM,
+    area_confidence,
     estimate_area_from_row_spacing,
     estimate_area_hectares,
 )
@@ -260,3 +262,64 @@ class TestEstimateAreaFromRowSpacing:
         area, source = estimate_area_from_row_spacing(image_bgr, "Corn")
 
         assert (area, source) == (None, "unavailable")
+
+
+class TestAreaConfidence:
+    def test_every_real_area_source_has_an_entry(self):
+        # estimate_area_hectares can return any of these source strings --
+        # a missing entry would silently fall through to the generic "low,
+        # no range" default, hiding a real gap rather than raising one.
+        real_sources = {
+            "exif_gps_altitude", "exif_gps_altitude_default_focal",
+            "xmp_relative_altitude", "xmp_relative_altitude_default_focal",
+            "manual_altitude", "manual_altitude_default_focal",
+            "row_spacing_estimate",
+        }
+        assert real_sources <= AREA_CONFIDENCE.keys()
+
+    def test_gps_altitude_sources_get_no_numeric_range(self):
+        # The MSL-vs-AGL gap (see the module's docstring) makes the real
+        # error structurally unbounded -- any numeric range here would be
+        # fake precision, not honesty.
+        for source in ("exif_gps_altitude", "exif_gps_altitude_default_focal"):
+            low, high, tier = area_confidence(source)
+            assert (low, high) == (None, None)
+            assert tier == "low"
+
+    def test_gps_altitude_is_demoted_from_a_naive_high_confidence(self):
+        # This is the actual defect this module fixes -- these sources used
+        # to read identically to genuinely-measured XMP/manual altitude.
+        _, _, gps_tier = area_confidence("exif_gps_altitude")
+        _, _, xmp_tier = area_confidence("xmp_relative_altitude")
+        assert gps_tier == "low"
+        assert xmp_tier == "high"
+        assert gps_tier != xmp_tier
+
+    def test_sources_with_a_real_focal_length_get_a_tight_range(self):
+        for source in ("xmp_relative_altitude", "manual_altitude"):
+            low, high, tier = area_confidence(source)
+            assert tier == "high"
+            assert low is not None and high is not None
+            assert low < 1.0 < high
+
+    def test_default_focal_sources_get_a_wider_asymmetric_range(self):
+        # Assumed lens uncertainty is genuinely asymmetric (area ~ 1/focal^2,
+        # and the plausible focal range isn't centered on the default) --
+        # this isn't a symmetric +/-X% guess.
+        low, high, tier = area_confidence("xmp_relative_altitude_default_focal")
+        assert tier == "medium"
+        assert low is not None and high is not None
+        assert low < 1.0 < high
+        assert (high - 1.0) != pytest.approx(1.0 - low)
+
+    def test_row_spacing_estimate_gets_a_defensible_range(self):
+        low, high, tier = area_confidence("row_spacing_estimate")
+        assert tier == "medium"
+        assert low is not None and high is not None
+        assert low < 1.0 < high
+
+    def test_unknown_source_falls_back_to_low_confidence_no_range(self):
+        low, high, tier = area_confidence("unavailable")
+        assert (low, high, tier) == (None, None, "low")
+        low, high, tier = area_confidence("something_new_and_unmapped")
+        assert (low, high, tier) == (None, None, "low")

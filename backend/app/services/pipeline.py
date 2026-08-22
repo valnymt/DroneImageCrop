@@ -116,13 +116,16 @@ class CropAnalysisPipeline:
         # actually distinguishes them for the caller.
         health = round(min(100, 0.40 * vegetation.vegetation_score + 0.35 * crop_coverage + 0.25 * texture.uniformity_score), 2)
         per_plant_kg = self.yield_estimator.resolve_per_plant_kg(crop, average_kg)
-        estimated = self.yield_estimator.estimate(plant_count, crop, crop_coverage, health, average_kg)
         h, w = image.shape[:2]
         # Same uniform-ground-scale assumption crop_density already makes
         # (area_ha spread evenly across the frame) -- not a new one
         # introduced for this.
         cm2_per_pixel = (area_ha * 1e8) / (w * h)
         plant_size = self.plant_size.analyze(instance_masks, cm2_per_pixel) if instance_masks else None
+        yield_size_factor, yield_size_note = self.yield_estimator.size_adjustment(plant_size, plant_count, area_ha)
+        estimated = self.yield_estimator.estimate(
+            plant_count, crop, crop_coverage, health, average_kg, plant_size, area_ha
+        )
         return AnalysisResult(
             plant_count=plant_count,
             crop_density=round(plant_count / area_ha, 2),
@@ -146,6 +149,8 @@ class CropAnalysisPipeline:
             plant_size_stats=PlantSizeStats(**asdict(plant_size)) if plant_size is not None else None,
             estimated_yield=estimated,
             average_yield_per_plant_kg=round(per_plant_kg, 3),
+            yield_size_factor=yield_size_factor,
+            yield_size_note=yield_size_note,
             confidence_score=round(confidence, 2),
             detections=detections,
             image_width=w,

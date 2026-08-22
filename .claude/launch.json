@@ -6,6 +6,12 @@
       "runtimeExecutable": "npx",
       "runtimeArgs": ["vinext", "dev"],
       "port": 3000
+    },
+    {
+      "name": "crop-backend",
+      "runtimeExecutable": "backend/.venv/Scripts/python.exe",
+      "runtimeArgs": ["-m", "uvicorn", "app.main:app", "--port", "8000", "--app-dir", "backend"],
+      "port": 8000
     }
   ]
 }

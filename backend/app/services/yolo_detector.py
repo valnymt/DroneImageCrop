@@ -13,7 +13,15 @@ logger = logging.getLogger(__name__)
 # models/ lives at the repo root -- a CWD-relative path would never match.
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
-CONF_THRESHOLD = 0.25
+# Empirically recalibrated for the Phase V merged-dataset checkpoint, not
+# Ultralytics' generic 0.25 default: its own F1-confidence curve
+# (backend/training/runs/merged_retrain/F1_curve.png) peaks at 0.394, not
+# 0.25 -- the old value was tuned (implicitly, by never being revisited)
+# for the pre-retrain checkpoint's very different confidence distribution.
+# Leaving it at 0.25 after the retrain would silently keep accepting
+# lower-confidence boxes than the new model's own precision/recall
+# tradeoff actually supports.
+CONF_THRESHOLD = 0.39
 IOU_THRESHOLD = 0.5
 # The fine-tuned checkpoint was trained exclusively on 640x640 exports (see
 # backend/training/EVAL_REPORT.md) -- tiling at this exact size means each

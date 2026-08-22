@@ -8,17 +8,19 @@ from fastapi import APIRouter, File, Form, HTTPException, Response, UploadFile
 from pydantic import ValidationError
 
 from app.services.crop_classifier import CropClassifier
-from app.services.field_area_estimator import estimate_area_hectares
+from app.services.field_area_estimator import area_confidence, estimate_area_hectares
 from app.services.flight_comparator import FlightComparator
 from app.services.image_encoding import encode_png_data_url
+from app.services.mosaic_stitcher import MAX_IMAGES, MosaicStitcher
 from app.services.pipeline import CropAnalysisPipeline
 from app.services.report_generator import generate_report_pdf
-from app.services.schemas import AnalysisResult, ComparisonResult, InspectResult, RecomputeResult
+from app.services.schemas import AnalysisResult, ComparisonResult, InspectResult, MosaicResult, RecomputeResult
 
 router = APIRouter(tags=["analysis"])
 pipeline = CropAnalysisPipeline()
 classifier = CropClassifier()
 comparator = FlightComparator()
+stitcher = MosaicStitcher()
 
 
 def _safe_pdf_filename(field_name: str, analysis_date: str) -> str:
@@ -86,11 +88,15 @@ async def inspect(
             raise HTTPException(422, "The uploaded image could not be decoded.")
         crop_type, confidence = classifier.classify(cv_image)
         area_ha, area_source = estimate_area_hectares(path, crop_type, manual_altitude_m)
+        low_mult, high_mult, tier = area_confidence(area_source)
         return InspectResult(
             crop_type=crop_type,
             confidence=round(confidence * 100, 2),
             estimated_area_hectares=area_ha,
             area_source=area_source,
+            area_low_hectares=round(area_ha * low_mult, 3) if area_ha is not None and low_mult is not None else None,
+            area_high_hectares=round(area_ha * high_mult, 3) if area_ha is not None and high_mult is not None else None,
+            area_confidence=tier,
         )
     finally:
         path.unlink(missing_ok=True)
@@ -154,6 +160,42 @@ async def compare(
         loss_percent=result.loss_percent,
         unchanged_percent=result.unchanged_percent,
         diff_overlay=encode_png_data_url(result.diff_overlay),
+        texture_uniformity_before=result.texture_uniformity_before,
+        texture_uniformity_after=result.texture_uniformity_after,
+        texture_shift_note=result.texture_shift_note,
+        warning=result.warning,
+    )
+
+
+@router.post("/mosaic", response_model=MosaicResult)
+async def mosaic(images: list[UploadFile] = File(...)) -> MosaicResult:
+    """Stitches multiple overlapping field photos into one wider composite
+    (see MosaicStitcher) -- a real multi-image feature-matching stitch, not
+    a georeferenced orthomosaic (no GPS/elevation data ties any pixel here
+    to a real-world coordinate; see MosaicStitcher's docstring). Rejects
+    outside [MIN_IMAGES, MAX_IMAGES] up front with a clear reason rather
+    than letting OpenCV fail on an obviously-invalid input count.
+    """
+    if len(images) > MAX_IMAGES:
+        raise HTTPException(422, f"Too many photos for one mosaic (max {MAX_IMAGES}, got {len(images)}).")
+    for image in images:
+        if image.content_type not in {"image/jpeg", "image/png"}:
+            raise HTTPException(415, "Only JPG and PNG images are supported.")
+
+    decoded: list[np.ndarray] = []
+    for image in images:
+        image_bytes = await image.read()
+        np_image = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
+        if np_image is None:
+            raise HTTPException(422, f"'{image.filename}' could not be decoded as an image.")
+        decoded.append(np_image)
+
+    result = stitcher.stitch(decoded)
+    return MosaicResult(
+        success=result.success,
+        mosaic=encode_png_data_url(result.mosaic) if result.mosaic is not None else None,
+        images_used=result.images_used,
+        images_submitted=result.images_submitted,
         warning=result.warning,
     )
 

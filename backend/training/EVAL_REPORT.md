@@ -159,3 +159,86 @@ Copied `training/runs/merged_retrain/weights/best.pt` to `models/yolo/best.pt`. 
 checkpoint is kept at `models/yolo/best.pt.pre-latvia-retrain.bak` for rollback. Verified through
 the real `YOLODetector` class (not just the raw Ultralytics model) and the full backend test
 suite (169/169 passing) before and after the swap.
+
+## What calibration evidence actually exists (and what still doesn't)
+
+`AnalysisResult.confidence_score`, `texture_uniformity_score`, and `flight_comparator`'s
+`inlier_ratio` are all self-reported by their own models -- none of them have ever been checked
+against real held-out accuracy. That's still true after this section. There is no ground-truth
+-labeled photo set from outside this project's own training/validation data to check real-world
+accuracy against, and building one is out of scope here -- so this section does **not** claim to
+validate real-world calibration. What it does answer, honestly: on the merged_retrain validation
+set's own labels, does YOLO's stated confidence track its own actual hit rate. That's a real,
+checkable question distinct from mAP/precision/recall (which measure ranking and coverage, not
+whether "70% confidence" boxes are right about 70% of the time) -- and a different, narrower
+claim than "this model is accurate in the field."
+
+**Method** (`backend/training/calibration_eval.py`): ran the deployed checkpoint over all 470
+validation images at `conf=0.001` (below the deployed 0.39 threshold, so low-confidence
+detections are included in the check rather than pre-filtered out), greedily matched each
+predicted box to an unclaimed same-class ground-truth box at IoU >= 0.5 (the same matching
+principle mAP itself uses), then binned all 36,273 resulting (confidence, correct/incorrect)
+pairs into 10 equal-width confidence bins.
+
+| Confidence bin | n | Mean confidence | Empirical precision | Gap |
+|---|---|---|---|---|
+| 0.0-0.1 | 30,377 | 0.010 | 0.007 | 0.003 |
+| 0.1-0.2 | 1,219 | 0.144 | 0.141 | 0.003 |
+| 0.2-0.3 | 863 | 0.248 | 0.297 | 0.049 |
+| 0.3-0.4 | 768 | 0.349 | 0.415 | 0.066 |
+| 0.4-0.5 | 755 | 0.449 | 0.564 | 0.116 |
+| 0.5-0.6 | 763 | 0.550 | 0.706 | 0.156 |
+| 0.6-0.7 | 733 | 0.648 | 0.804 | 0.156 |
+| 0.7-0.8 | 545 | 0.747 | 0.850 | 0.103 |
+| 0.8-0.9 | 219 | 0.837 | 0.886 | 0.049 |
+| 0.9-1.0 | 31 | 0.926 | 1.000 | 0.074 |
+
+**Expected Calibration Error (ECE): 0.016.** **Brier score: 0.0365.** Both look excellent at
+face value, but that's mostly the huge 0.0-0.1 bin (30,377 of 36,273 total predictions --
+overwhelmingly correct near-zero-confidence background boxes) pulling the weighted average down;
+it says little about calibration in the range that actually matters for deployment.
+
+**The finding that matters**: around and above the deployed `CONF_THRESHOLD = 0.39` (see
+`yolo_detector.py`), the model is **consistently underconfident**, not overconfident -- gaps of
+0.10-0.16 in the 0.4-0.7 confidence range, all in the same direction (empirical precision higher
+than stated confidence; see `runs/calibration/reliability_diagram.png`, where the curve sits
+above the diagonal the whole way through the deployed operating range). A detection the model
+calls "55% confident" is actually right about 71% of the time on this validation set. This is the
+safe direction to be wrong in -- a system that trusts its own stated confidence too little, not
+too much -- but it is still a real miscalibration, not the "well-calibrated" result a flat
+ECE/Brier number alone would suggest.
+
+**Honest limits of this measurement, stated plainly:**
+- This is calibration against the model's *own* validation set, drawn from the same two merged
+  training distributions (see Phase V above). It says nothing about calibration on a genuinely
+  out-of-distribution photo -- Phase U's `OpenVocabDetector` fallback exists for exactly that
+  case and has no calibration measurement of its own here.
+- `texture_uniformity_score` and `inlier_ratio` have no equivalent check in this report and
+  still don't -- there's no analogous ground-truth "correct texture pattern" or "correct
+  alignment" label to check them against, unlike YOLO's boxes which have real annotated
+  ground truth to match against. That gap is unresolved, not overlooked.
+- No downstream code currently corrects for the underconfidence found here (e.g. no
+  temperature-scaling or isotonic recalibration applied to `confidence_score`) -- this section
+  is a measurement, not a fix. `AnalysisResult.confidence_score` remains YOLO's raw self-reported
+  number.
+
+## Held-out test-set check (never used in any tuning decision until now)
+
+Every number above -- mAP, the confidence threshold recalibration, the calibration check -- was
+computed against the **validation** split. `data/yolo/data.yaml` has always defined a separate
+**test** split (236 images) that had never actually been evaluated anywhere in this project until
+now (confirmed by grep -- no prior mention of `split="test"` or `images/test` in this file).
+Running the deployed `merged_retrain` checkpoint against it for the first time:
+
+| Split | mAP50 | mAP50-95 | Precision | Recall |
+|---|---|---|---|---|
+| Validation (used for every decision above) | 0.746 | 0.470 | 0.635 | 0.699 |
+| **Test (never touched before this check)** | **0.743** | **0.456** | **0.671** | **0.726** |
+
+Essentially identical. This is real evidence -- not a re-run of the same numbers -- that the
+checkpoint selection and the `CONF_THRESHOLD=0.39` recalibration weren't quietly overfit to the
+specific images in the validation set. **Still an important caveat, stated plainly**: this test
+split is drawn from the same source datasets as train/valid (see Phase V and the "more datasets"
+section below) -- it's genuinely held-out data, but not independent data from a different
+collection effort. It answers "did we overfit to validation" (no), not "does this generalize to
+the real world" (still unmeasured, see the calibration section's honest limits above).

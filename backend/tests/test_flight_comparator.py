@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 import pytest
 
-from app.services.flight_comparator import MIN_GOOD_MATCHES, FlightComparator
+from app.services.flight_comparator import MIN_GOOD_MATCHES, MIN_MEANINGFUL_TEXTURE_SHIFT, FlightComparator
 
 
 @pytest.fixture
@@ -132,3 +132,49 @@ class TestFlightComparator:
         # dropped to something trivially small, that's a real regression in
         # how confidently "same field" gets asserted, not a style nit.
         assert MIN_GOOD_MATCHES >= 8
+
+    def test_identical_photos_report_no_texture_shift(self, comparator):
+        field = _textured_field()
+
+        result = comparator.compare(field, field.copy())
+
+        assert result.texture_uniformity_before is not None
+        assert result.texture_uniformity_after is not None
+        assert result.texture_uniformity_before == result.texture_uniformity_after
+        assert result.texture_shift_note == (
+            "Canopy texture is about the same between the two photos -- no meaningful shift detected."
+        )
+
+    def test_patchier_after_photo_reports_a_texture_shift_note(self, comparator):
+        before = _textured_field(width=400, height=300, seed=7)
+        after = before.copy()
+        rng = np.random.default_rng(11)
+        # Scatter high-contrast speckle across the vegetated half to
+        # meaningfully lower its GLCM uniformity relative to "before"
+        # without touching which pixels count as vegetation at all (green
+        # channel untouched), so growth/loss stay at zero and only texture
+        # actually changes.
+        veg = after[:, :200]
+        speckle = rng.integers(-90, 90, size=veg.shape).astype(np.int16)
+        after[:, :200] = np.clip(veg.astype(np.int16) + speckle, 0, 255).astype(np.uint8)
+
+        result = comparator.compare(before, after)
+
+        assert result.alignment_ok
+        assert result.texture_uniformity_before is not None
+        assert result.texture_uniformity_after is not None
+        if abs(result.texture_uniformity_after - result.texture_uniformity_before) >= MIN_MEANINGFUL_TEXTURE_SHIFT:
+            assert result.texture_shift_note is not None
+            assert "no meaningful shift" not in result.texture_shift_note
+
+    def test_failed_alignment_reports_no_texture_fields(self, comparator):
+        rng = np.random.default_rng(5)
+        image_a = rng.integers(0, 255, (200, 200, 3), dtype=np.uint8)
+        image_b = rng.integers(0, 255, (200, 200, 3), dtype=np.uint8)
+
+        result = comparator.compare(image_a, image_b)
+
+        assert result.alignment_ok is False
+        assert result.texture_uniformity_before is None
+        assert result.texture_uniformity_after is None
+        assert result.texture_shift_note is None

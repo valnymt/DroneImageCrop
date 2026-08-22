@@ -74,6 +74,14 @@ class AnalysisResult(BaseModel):
     # can persist/display the real number used rather than a guess of
     # their own.
     average_yield_per_plant_kg: float = Field(ge=0)
+    # How much estimated_yield was scaled by each plant's own measured
+    # canopy size vs. the flat per-plant baseline (see
+    # YieldEstimator.size_adjustment) -- 1.0 whenever plant_size_stats
+    # wasn't available to compute one. A heuristic nudge, not a calibrated
+    # biomass measurement; yield_size_note explains why in plain language
+    # whenever the factor moved meaningfully.
+    yield_size_factor: float = Field(default=1.0, ge=0)
+    yield_size_note: str | None = None
     confidence_score: float = Field(ge=0, le=100)
     detections: list[Detection]
     # Pixel space that `detections` coordinates are relative to -- the
@@ -116,6 +124,31 @@ class ComparisonResult(BaseModel):
     loss_percent: float = Field(ge=0, le=100)
     unchanged_percent: float
     diff_overlay: str  # data: URL (base64 PNG)
+    # GLCM texture uniformity (see app/services/texture_analyzer.py) of
+    # each photo's vegetation within the overlap region -- None when either
+    # photo has too little overlapping vegetation to measure. Lets Compare
+    # show a real before/after texture reading, not just growth/loss area.
+    texture_uniformity_before: float | None = Field(default=None, ge=0, le=100)
+    texture_uniformity_after: float | None = Field(default=None, ge=0, le=100)
+    texture_shift_note: str | None = None
+    warning: str | None = None
+
+
+class MosaicResult(BaseModel):
+    """Response for POST /api/mosaic -- OpenCV multi-image stitching of
+    several overlapping field photos into one wider composite (see
+    app/services/mosaic_stitcher.py). NOT a georeferenced orthomosaic:
+    mosaic is a real, algorithmically-stitched image in the first photo's
+    own relative pixel space, not tied to any real-world coordinate --
+    there's no GPS/elevation data here to ortho-rectify against. success
+    is False whenever OpenCV's stitcher couldn't align the photos (too
+    little overlap, not the same field, etc.) -- mosaic is null in that
+    case, not a guess."""
+
+    success: bool
+    mosaic: str | None = None  # data: URL (base64 PNG)
+    images_used: int = Field(ge=0)
+    images_submitted: int = Field(ge=0)
     warning: str | None = None
 
 
@@ -132,3 +165,13 @@ class InspectResult(BaseModel):
     confidence: float = Field(ge=0, le=100)
     estimated_area_hectares: float | None = Field(default=None, ge=0)
     area_source: str
+    # A real range on estimated_area_hectares, not the point value dressed
+    # up as more precise than it is -- see field_area_estimator.py's
+    # AREA_CONFIDENCE for how each is derived from the GSD formula's own
+    # sensitivity to that source's specific weak assumption. Both null
+    # whenever the source's error is structurally unbounded (see
+    # exif_gps_altitude's docs) or no estimate was produced at all -- a
+    # missing range is honest here, not a gap to fill with a guess.
+    area_low_hectares: float | None = Field(default=None, ge=0)
+    area_high_hectares: float | None = Field(default=None, ge=0)
+    area_confidence: str = "low"

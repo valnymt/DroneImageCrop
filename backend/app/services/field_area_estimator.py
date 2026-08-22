@@ -175,6 +175,58 @@ def estimate_area_from_row_spacing(image_bgr: np.ndarray, crop_type: str | None)
     return round(area_m2 / 10000, 3), "row_spacing_estimate"
 
 
+# (low_multiplier, high_multiplier, confidence_tier) per area_source --
+# NOT fabricated error bars. Each range comes from actually propagating a
+# real, known uncertainty in that source's weakest input through the GSD
+# formula's own math: area ~ (altitude / focal_length)^2 (see
+# _area_from_gsd), so a fractional error in altitude or focal length of x
+# becomes roughly a (1+/-x)^2 fractional error in area -- not a number
+# pulled from nowhere.
+#
+# exif_gps_altitude* is the one real defect this mapping surfaces, not
+# just documents: standard EXIF GPSAltitude is height above/below mean
+# sea level (see GPSAltitudeRef, EXIF spec), not the drone's height above
+# the ground it photographed. A field at 300m elevation photographed from
+# 100m AGL reports ~400m GPS altitude, which _area_from_gsd would treat as
+# a 400m flight -- 16x the true area. There's no local ground-elevation
+# data available here to correct for that gap, so unlike the other
+# sources, this one gets no numeric range at all: any number would be
+# fake precision on an error that's structurally unbounded, not just
+# larger. It's demoted to "low" confidence instead of previously reading
+# identically to the genuinely reliable XMP/manual paths.
+_FOCAL_LOW_MM, _FOCAL_HIGH_MM = 20.0, 35.0  # realistic 35mm-equivalent spread across phone/drone cameras
+_FOCAL_DEFAULT_ERROR = (
+    (DEFAULT_FOCAL_LENGTH_35MM_MM / _FOCAL_HIGH_MM) ** 2,
+    (DEFAULT_FOCAL_LENGTH_35MM_MM / _FOCAL_LOW_MM) ** 2,
+)
+# Real between-field/cultivar row-spacing variance for a given crop type
+# is easily +/-30% around one textbook number (see ROW_SPACING_METERS) --
+# this reflects that spread, not the periodicity-detection confidence
+# already gated by ROW_SPACING_CONFIDENCE_THRESHOLD.
+_ROW_SPACING_ERROR = (0.7**2, 1.3**2)
+
+AREA_CONFIDENCE: dict[str, tuple[float | None, float | None, str]] = {
+    "exif_gps_altitude": (None, None, "low"),
+    "exif_gps_altitude_default_focal": (None, None, "low"),
+    "xmp_relative_altitude": (0.9, 1.1, "high"),
+    "xmp_relative_altitude_default_focal": (*_FOCAL_DEFAULT_ERROR, "medium"),
+    "manual_altitude": (0.9, 1.1, "high"),
+    "manual_altitude_default_focal": (*_FOCAL_DEFAULT_ERROR, "medium"),
+    "row_spacing_estimate": (*_ROW_SPACING_ERROR, "medium"),
+}
+
+
+def area_confidence(source: str) -> tuple[float | None, float | None, str]:
+    """(low_multiplier, high_multiplier, confidence_tier) for an
+    area_source string returned by estimate_area_hectares. Multipliers are
+    None (no numeric range -- see AREA_CONFIDENCE's docstring above) for
+    sources whose error is structurally unbounded, not just wide.
+    "unavailable" and anything unrecognized falls back to (None, None,
+    "low") -- an unmeasured default, not a range around a real estimate.
+    """
+    return AREA_CONFIDENCE.get(source, (None, None, "low"))
+
+
 def estimate_area_hectares(
     path: Path, crop_type: str | None = None, manual_altitude_m: float | None = None,
 ) -> tuple[float | None, str]:

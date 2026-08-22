@@ -1,6 +1,7 @@
 import io
 from unittest.mock import patch
 
+import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
@@ -209,6 +210,31 @@ def test_inspect_returns_suggestions(mock_classifier, mock_estimate_area):
     assert body["confidence"] == 68.89
     assert body["estimated_area_hectares"] == 2.5
     assert body["area_source"] == "exif_gps_altitude"
+    # exif_gps_altitude's error is structurally unbounded (MSL, not AGL --
+    # see field_area_estimator.AREA_CONFIDENCE), so this must come back as
+    # "low" confidence with no fabricated numeric range, not a fake one.
+    assert body["area_confidence"] == "low"
+    assert body["area_low_hectares"] is None
+    assert body["area_high_hectares"] is None
+
+
+@patch("app.api.analysis.estimate_area_hectares")
+@patch("app.api.analysis.classifier")
+def test_inspect_surfaces_a_real_range_for_a_trustworthy_source(mock_classifier, mock_estimate_area):
+    mock_classifier.classify.return_value = ("Corn", 0.8)
+    mock_estimate_area.return_value = (3.1, "xmp_relative_altitude")
+
+    response = client.post(
+        "/api/inspect",
+        files={"image": ("test.jpg", real_jpeg_bytes(), "image/jpeg")},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["area_confidence"] == "high"
+    assert body["area_low_hectares"] == pytest.approx(3.1 * 0.9)
+    assert body["area_high_hectares"] == pytest.approx(3.1 * 1.1)
+    assert body["area_low_hectares"] < body["estimated_area_hectares"] < body["area_high_hectares"]
 
 
 @patch("app.api.analysis.estimate_area_hectares")
@@ -336,7 +362,10 @@ def test_compare_returns_alignment_result(mock_comparator):
     mock_comparator.compare.return_value = ComparisonResult(
         alignment_ok=True, keypoints_matched=87, inlier_ratio=91.2,
         growth_percent=4.5, loss_percent=1.2, unchanged_percent=94.3,
-        diff_overlay=np.zeros((10, 10, 3), dtype=np.uint8), warning=None,
+        diff_overlay=np.zeros((10, 10, 3), dtype=np.uint8),
+        texture_uniformity_before=62.0, texture_uniformity_after=48.0,
+        texture_shift_note="Canopy texture got 14 points more patchy/irregular since the earlier photo.",
+        warning=None,
     )
 
     response = client.post(
@@ -353,6 +382,9 @@ def test_compare_returns_alignment_result(mock_comparator):
     assert body["keypoints_matched"] == 87
     assert body["growth_percent"] == 4.5
     assert body["diff_overlay"].startswith("data:image/png;base64,")
+    assert body["texture_uniformity_before"] == 62.0
+    assert body["texture_uniformity_after"] == 48.0
+    assert body["texture_shift_note"] is not None
     assert body["warning"] is None
 
 
@@ -366,6 +398,7 @@ def test_compare_surfaces_alignment_failure_without_erroring(mock_comparator):
         alignment_ok=False, keypoints_matched=0, inlier_ratio=0.0,
         growth_percent=0.0, loss_percent=0.0, unchanged_percent=0.0,
         diff_overlay=np.zeros((1, 1, 3), dtype=np.uint8),
+        texture_uniformity_before=None, texture_uniformity_after=None, texture_shift_note=None,
         warning="Only 3 reliable matching features found between the two photos (need at least 12).",
     )
 
@@ -390,6 +423,86 @@ def test_compare_rejects_undecodable_image():
             "image_before": ("before.jpg", b"not-a-real-jpeg", "image/jpeg"),
             "image_after": ("after.jpg", real_jpeg_bytes(), "image/jpeg"),
         },
+    )
+    assert response.status_code == 422
+
+
+# /mosaic (multi-image stitching, Phase W) -- MosaicStitcher is mocked
+# below for the same reason FlightComparator is above: these exercise the
+# API contract (rejection rules, request/response shape), not OpenCV's
+# actual stitching, which test_mosaic_stitcher.py covers with real photos.
+
+def test_mosaic_rejects_unsupported_content_type():
+    response = client.post(
+        "/api/mosaic",
+        files=[
+            ("images", ("a.jpg", real_jpeg_bytes(), "image/jpeg")),
+            ("images", ("b.txt", b"not an image", "text/plain")),
+        ],
+    )
+    assert response.status_code == 415
+
+
+def test_mosaic_rejects_too_many_images():
+    from app.services.mosaic_stitcher import MAX_IMAGES
+
+    files = [("images", (f"{i}.jpg", real_jpeg_bytes(), "image/jpeg")) for i in range(MAX_IMAGES + 1)]
+    response = client.post("/api/mosaic", files=files)
+    assert response.status_code == 422
+
+
+@patch("app.api.analysis.stitcher")
+def test_mosaic_returns_stitched_result(mock_stitcher):
+    import numpy as np
+
+    from app.services.mosaic_stitcher import MosaicResult as MosaicServiceResult
+
+    mock_stitcher.stitch.return_value = MosaicServiceResult(
+        success=True, mosaic=np.zeros((50, 150, 3), dtype=np.uint8),
+        images_used=3, images_submitted=3, warning=None,
+    )
+
+    response = client.post(
+        "/api/mosaic",
+        files=[("images", (f"{i}.jpg", real_jpeg_bytes(), "image/jpeg")) for i in range(3)],
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is True
+    assert body["images_used"] == 3
+    assert body["mosaic"].startswith("data:image/png;base64,")
+    assert body["warning"] is None
+
+
+@patch("app.api.analysis.stitcher")
+def test_mosaic_surfaces_stitch_failure_without_erroring(mock_stitcher):
+    from app.services.mosaic_stitcher import MosaicResult as MosaicServiceResult
+
+    mock_stitcher.stitch.return_value = MosaicServiceResult(
+        success=False, mosaic=None, images_used=0, images_submitted=2,
+        warning="Could not find a reliable alignment between these photos -- they may not overlap enough or may not show the same field.",
+    )
+
+    response = client.post(
+        "/api/mosaic",
+        files=[("images", (f"{i}.jpg", real_jpeg_bytes(), "image/jpeg")) for i in range(2)],
+    )
+
+    assert response.status_code == 200  # a failed stitch is a valid, honest response -- not a server error
+    body = response.json()
+    assert body["success"] is False
+    assert body["mosaic"] is None
+    assert "reliable alignment" in body["warning"]
+
+
+def test_mosaic_rejects_undecodable_image():
+    response = client.post(
+        "/api/mosaic",
+        files=[
+            ("images", ("a.jpg", b"not-a-real-jpeg", "image/jpeg")),
+            ("images", ("b.jpg", real_jpeg_bytes(), "image/jpeg")),
+        ],
     )
     assert response.status_code == 422
 

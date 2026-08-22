@@ -232,6 +232,41 @@ class TestPlantSizeStatsWiring:
         assert result.plant_size_stats.plant_count == 2
         assert result.plant_size_stats.mean_area_cm2 > 0
 
+    def test_yield_size_factor_reflects_measured_plant_size(self, tmp_path):
+        # Same setup as above, but with plant_count actually matching the 2
+        # instance masks (detector.detect() is [] by default in
+        # _mocked_pipeline, which would make size_adjustment's plant_count
+        # guard short-circuit to a neutral 1.0 regardless of the real
+        # canopy-size math -- this confirms the pipeline threads
+        # plant_size_stats/area_ha into YieldEstimator.size_adjustment for
+        # real, not just computes plant_size_stats and discards it).
+        pipeline = _mocked_pipeline()
+        h, w = 100, 100
+        pipeline.cv.load_and_preprocess.return_value = np.zeros((h, w, 3), dtype=np.uint8)
+        pipeline.cv.vegetation_metrics.return_value = SimpleNamespace(
+            green_mask=np.zeros((h, w), dtype=np.uint8),
+            coverage_percent=10.0, vegetation_score=20.0, health_score=30.0,
+            heatmap=np.zeros((h, w, 3), dtype=np.uint8),
+        )
+        pipeline.detector.detect.return_value = [_fake_detection(), _fake_detection()]
+        small = np.zeros((h, w), dtype=bool)
+        cv2.circle(small.view(np.uint8), (20, 20), 8, 1, -1)
+        large = np.zeros((h, w), dtype=bool)
+        cv2.circle(large.view(np.uint8), (70, 70), 8, 1, -1)
+        pipeline.segmenter.segment_instances.return_value = [small, large]
+        pipeline.segmenter.union_masks.side_effect = lambda instances, shape: np.zeros(shape, dtype=np.uint8)
+        path = tmp_path / "img.jpg"
+        cv2.imwrite(str(path), np.zeros((h, w, 3), dtype=np.uint8))
+
+        # area_ha=0.0001 -> 1cm^2/px over this 100x100 frame, split across 2
+        # plants -> 5,000cm^2 allotted each. Both circles measure ~200cm^2,
+        # far under that -- the factor should be nudged down accordingly.
+        result = pipeline.analyze(path, "Wheat", area_ha=0.0001)
+
+        assert result.yield_size_factor < 1.0
+        assert result.yield_size_note is not None
+        assert "nudged down" in result.yield_size_note
+
 
 def _fake_detection() -> Detection:
     return Detection(x1=1.0, y1=1.0, x2=10.0, y2=10.0, confidence=0.2, label="plant (general detector)")
