@@ -16,6 +16,9 @@ class VegetationMetrics:
     heatmap: np.ndarray
     vari_score: float = 0.0
     exgr_score: float = 0.0
+    # Reliability of the RGB vegetation mask, kept separate from
+    # vegetation_score (which measures how green the accepted crop pixels are).
+    mask_confidence_score: float = 0.0
 
 
 class OpenCVProcessor:
@@ -73,6 +76,15 @@ class OpenCVProcessor:
         vegetation = min(100.0, green_dominance / 1.5)
         vari_score = min(100.0, max(0.0, vari_dominance * 100))
         exgr_score = min(100.0, exgr_dominance / 1.5)
+        # Confidence asks whether the RGB indices agree that the selected
+        # pixels are vegetation; it must not reuse greenness. A selected
+        # pixel supported by 3/3 indices is stronger evidence than one
+        # supported by only 2/3. A very tiny mask is also less reliable than
+        # a substantial crop region, but sparse crops are not rejected.
+        selected = votes >= 2
+        index_agreement = float(np.mean(votes[selected]) / 3 * 100) if np.any(selected) else 0.0
+        coverage_reliability = min(100.0, float(np.sqrt(coverage / 20.0) * 100)) if coverage > 0 else 0.0
+        mask_confidence = 0.75 * index_agreement + 0.25 * coverage_reliability
         health = min(100.0, 0.55 * vegetation + 0.45 * coverage)
         exg_normalized = cv2.normalize(exg, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
         heatmap = cv2.applyColorMap(exg_normalized, cv2.COLORMAP_TURBO)
@@ -84,6 +96,7 @@ class OpenCVProcessor:
             heatmap,
             round(vari_score, 2),
             round(exgr_score, 2),
+            round(mask_confidence, 2),
         )
 
     @staticmethod

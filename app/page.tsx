@@ -12,6 +12,8 @@ type Settings = {
   modelProfile: "sensitive" | "balanced" | "precise";
 };
 
+type AuthUser = { id: string; email: string; username: string; occupation: string };
+
 const DEFAULT_SETTINGS: Settings = {
   areaUnit: "ha",
   enhancement: true,
@@ -21,6 +23,7 @@ const DEFAULT_SETTINGS: Settings = {
 };
 
 const SETTINGS_STORAGE_KEY = "agrisight-settings";
+const LATEST_ANALYSIS_STORAGE_KEY = "agrisight-latest-analysis";
 
 // Mirrors backend/app/services/yolo_detector.py's CONF_THRESHOLD (0.25,
 // "balanced") -- sensitivity trades false negatives for false positives.
@@ -58,6 +61,7 @@ type Detection = { x1: number; y1: number; x2: number; y2: number; confidence: n
 
 type AnalysisResult = {
   plant_count: number;
+  estimated_plant_count: number | null;
   // "fine_tuned" (normal) or "general_fallback" -- the fine-tuned YOLO
   // model found nothing despite real vegetation coverage, so a zero-shot
   // open-vocabulary detector ran instead. Less precise in-distribution,
@@ -308,6 +312,7 @@ export default function Home() {
   const [preview, setPreview] = useState("");
   const [crop, setCrop] = useState("Wheat");
   const [area, setArea] = useState("2");
+  const [averageYield, setAverageYield] = useState("");
   const [fieldName, setFieldName] = useState("West Field");
   const [analyzing, setAnalyzing] = useState(false);
   const [analyzeError, setAnalyzeError] = useState<string | null>(null);
@@ -329,6 +334,17 @@ export default function Home() {
   const [cropConfidence, setCropConfidence] = useState<number | null>(null);
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
   const inputRef = useRef<HTMLInputElement>(null);
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [authMode, setAuthMode] = useState<"signin" | "signup">("signin");
+  const [authOpen, setAuthOpen] = useState(false);
+
+  useEffect(() => {
+    fetch("/api/auth/me").then((response) => response.json()).then((body: { user: AuthUser | null }) => {
+      setAuthUser(body.user);
+    }).catch(() => {});
+  }, []);
+
+  const t = (key: string): string => key;
   const inspectRequestId = useRef(0);
   const inspectPromiseRef = useRef<Promise<void> | null>(null);
 
@@ -340,6 +356,35 @@ export default function Home() {
   function saveSettings(next: Settings) {
     setSettings(next);
     persistSettings(next);
+  }
+
+  async function signOut() {
+    await fetch("/api/auth/logout", { method: "POST" });
+    setAuthUser(null);
+  }
+
+  function startNewSession() {
+    setFile(null);
+    setPreview("");
+    setCrop("Wheat");
+    setArea("2");
+    setAverageYield("");
+    setFieldName("West Field");
+    setAnalyzing(false);
+    setAnalyzeError(null);
+    setInspecting(false);
+    setCropSuggested(false);
+    setAreaSuggested(false);
+    setAreaSource(null);
+    setAreaLowHectares(null);
+    setAreaHighHectares(null);
+    setManualAltitude("");
+    setCropConfidence(null);
+    inspectPromiseRef.current = null;
+    if (inputRef.current) {
+      inputRef.current.value = "";
+    }
+    setView("analyze");
   }
 
   const totals = useMemo(() => ({
@@ -407,7 +452,7 @@ export default function Home() {
       const result: InspectResult = await res.json();
       if (requestId !== inspectRequestId.current) return;
       if (SUPPORTED_CROPS.includes(result.crop_type)) applyCrop(result.crop_type, true);
-      if (result.estimated_area_hectares != null) applyArea(String(result.estimated_area_hectares), true);
+      if (result.estimated_area_hectares != null && result.estimated_area_hectares > 0) applyArea(String(result.estimated_area_hectares), true);
       setAreaSource(result.area_source);
       setAreaLowHectares(result.area_low_hectares);
       setAreaHighHectares(result.area_high_hectares);
@@ -434,21 +479,21 @@ export default function Home() {
 
   async function runAnalysis() {
     if (!file) return;
-    // AI inspection (crop type + field area) is the authoritative input to
-    // /analyze now -- wait for whatever inspection pass is in flight for
-    // the current file so we never submit stale/default values while a
-    // real prediction is still loading.
-    if (inspectPromiseRef.current) await inspectPromiseRef.current;
     setAnalyzing(true);
     setAnalyzeError(null);
     try {
+      // AI inspection (crop type + field area) is the authoritative input to
+      // /analyze now -- wait for whatever inspection pass is in flight for
+      // the current file so we never submit stale/default values while a
+      // real prediction is still loading.
+      if (inspectPromiseRef.current) await inspectPromiseRef.current;
       const formData = new FormData();
       formData.append("image", file);
       formData.append("crop_type", crop);
       formData.append("field_size_hectares", area);
-      // average_yield_per_plant_kg is intentionally NOT sent -- the backend
-      // resolves its own crop-specific, health/coverage-adjusted per-plant
-      // yield (see YieldEstimator) rather than this app supplying one.
+      if (averageYield && Number(averageYield) > 0) {
+        formData.append("average_yield_per_plant_kg", averageYield);
+      }
       formData.append("enhance", String(settings.enhancement));
       formData.append("refine_segmentation", String(settings.segmentationRefinement));
       formData.append("correct_tilt", String(settings.perspectiveCorrection));
@@ -469,6 +514,11 @@ export default function Home() {
       };
       const analysis: Analysis = { id: Date.now(), ...result, ...meta };
       setLatest(analysis);
+      try {
+        sessionStorage.setItem(LATEST_ANALYSIS_STORAGE_KEY, JSON.stringify(analysis));
+      } catch {
+        // Large data URLs may exceed storage limits; keep the in-memory result.
+      }
       setView("results");
 
       // Persist to the app's own D1-backed history so it survives a
@@ -483,6 +533,7 @@ export default function Home() {
             field_size_hectares: Number(area),
             average_yield_per_plant_kg: result.average_yield_per_plant_kg,
             plant_count: result.plant_count,
+            estimated_plant_count: result.estimated_plant_count,
             crop_density: result.crop_density,
             crop_coverage: result.crop_coverage,
             vegetation_score: result.vegetation_score,
@@ -514,31 +565,32 @@ export default function Home() {
       <aside className="sidebar">
         <button className="brand" onClick={() => setView("dashboard")}><span className="brandmark">A</span><span>AGRISIGHT<small>INTELLIGENCE</small></span></button>
         <nav>
-          <p className="nav-label">WORKSPACE</p>
-          {nav.map(([id, icon, label]) => <button key={id} className={view === id ? "active" : ""} onClick={() => setView(id)}><i>{icon}</i>{label}</button>)}
+          <p className="nav-label">{t("WORKSPACE")}</p>
+          {nav.map(([id, icon, label]) => <button key={id} className={view === id ? "active" : ""} onClick={() => id === "analyze" ? (latest ? setView("results") : startNewSession()) : setView(id)}><i>{icon}</i>{t(label)}</button>)}
         </nav>
         <div className="sidebar-foot">
-          <div className="system"><span className="pulse" /><span><b>AI systems operational</b><small>YOLO · SAM · OpenCV</small></span></div>
-          <div className="profile"><div>MK</div><span><b>Dr. May Khine</b><small>Agricultural Researcher</small></span><button>⋮</button></div>
+          <div className="system"><span className="pulse" /><span><b>{t("AI systems operational")}</b><small>YOLO · SAM · OpenCV</small></span></div>
+          <div className="profile"><div>{authUser ? authUser.username.slice(0, 2).toUpperCase() : "MK"}</div><span><b>{authUser?.username ?? "Dr. May Khine"}</b><small>{authUser?.occupation ?? t("Agricultural Researcher")}</small></span><button type="button" onClick={authUser ? signOut : () => { setAuthMode("signin"); setAuthOpen(true); }} aria-label={authUser ? "Sign out" : "Sign in"}>⋮</button></div>
         </div>
       </aside>
 
       <section className="content">
-        <header><div><span className="eyebrow">DRONE CROP INTELLIGENCE</span><h1>{view === "dashboard" ? "Field overview" : view === "analyze" ? "Analyze a field" : view === "results" ? "Analysis complete" : view === "history" ? "Field history" : view === "compare" ? "Compare flights" : view === "mosaic" ? "Field mosaic" : "System settings"}</h1></div><div className="header-actions"><button className="icon-btn">?</button><button className="icon-btn">♢</button><button className="primary compact" onClick={() => setView("analyze")}>＋ New analysis</button></div></header>
+        <header><div><span className="eyebrow">{t("DRONE CROP INTELLIGENCE")}</span><h1>{view === "dashboard" ? t("Field overview") : view === "analyze" ? t("Analyze a field") : view === "results" ? t("Analysis complete") : view === "history" ? t("Field history") : view === "compare" ? t("Compare flights") : view === "mosaic" ? t("Field mosaic") : t("System settings")}</h1></div><div className="header-actions"><button className="primary compact" onClick={startNewSession}>＋ {t("New analysis")}</button></div></header>
 
-        {view === "dashboard" && <Dashboard records={records} totals={totals} onAnalyze={() => setView("analyze")} onHistory={() => setView("history")} onCompare={() => setView("compare")} />}
-        {view === "analyze" && <Upload file={file} preview={preview} fieldName={fieldName} crop={crop} area={area} analyzing={analyzing} error={analyzeError} inspecting={inspecting} cropSuggested={cropSuggested} areaSuggested={areaSuggested} areaSource={areaSource} manualAltitude={manualAltitude} setManualAltitude={setManualAltitude} onEstimateAltitude={estimateWithManualAltitude} areaUnit={settings.areaUnit} inputRef={inputRef} onFile={chooseFile} setFieldName={setFieldName} run={runAnalysis} />}
-        {view === "results" && latest && <Results data={latest} file={file} areaUnit={settings.areaUnit} onNew={() => setView("analyze")} onAdjust={(patch) => setLatest((prev) => prev ? { ...prev, ...patch } : prev)} />}
-        {view === "history" && <History records={records} loading={historyLoading} error={historyError} onRetry={fetchHistory} areaUnit={settings.areaUnit} />}
-        {view === "compare" && <Compare />}
-        {view === "mosaic" && <Mosaic />}
-        {view === "settings" && <Settings settings={settings} onSave={saveSettings} />}
+        {view === "dashboard" && <Dashboard records={records} totals={totals} onAnalyze={startNewSession} onHistory={() => setView("history")} t={t} />}
+        {view === "analyze" && <Upload file={file} preview={preview} fieldName={fieldName} crop={crop} area={area} averageYield={averageYield} analyzing={analyzing} error={analyzeError} inspecting={inspecting} cropSuggested={cropSuggested} areaSuggested={areaSuggested} areaSource={areaSource} manualAltitude={manualAltitude} setManualAltitude={setManualAltitude} onEstimateAltitude={estimateWithManualAltitude} areaUnit={settings.areaUnit} inputRef={inputRef} onFile={chooseFile} setFieldName={setFieldName} setCrop={setCrop} setArea={setArea} setAverageYield={setAverageYield} run={runAnalysis} t={t} />}
+        {view === "results" && latest && <Results data={latest} file={file} areaUnit={settings.areaUnit} onNew={startNewSession} onAdjust={(patch) => setLatest((prev) => prev ? { ...prev, ...patch } : prev)} t={t} />}
+        {view === "history" && <History records={records} loading={historyLoading} error={historyError} onRetry={fetchHistory} areaUnit={settings.areaUnit} t={t} />}
+        {view === "compare" && <Compare t={t} />}
+        {view === "mosaic" && <Mosaic t={t} />}
+        {view === "settings" && <Settings settings={settings} onSave={saveSettings} t={t} />}
       </section>
+      {authOpen && <AuthModal initialMode={authMode} onClose={() => setAuthOpen(false)} onSuccess={(user) => { setAuthUser(user); setAuthOpen(false); }} />}
     </main>
   );
 }
 
-function Dashboard({ records, totals, onAnalyze, onHistory, onCompare }: { records: HistoryRow[]; totals: { plants: number; yieldKg: number; density: number }; onAnalyze: () => void; onHistory: () => void; onCompare: () => void }) {
+function Dashboard({ records, totals, onAnalyze, onHistory, t }: { records: HistoryRow[]; totals: { plants: number; yieldKg: number; density: number }; onAnalyze: () => void; onHistory: () => void; t: (k: string) => string }) {
   const [period, setPeriod] = useState<"3" | "6" | "12" | "all">("6");
 
   const thisMonth = monthKey(new Date());
@@ -550,12 +602,15 @@ function Dashboard({ records, totals, onAnalyze, onHistory, onCompare }: { recor
   // meaningful -- otherwise it's undefined, not zero, so it's left off
   // rather than shown as a fabricated "+0%" or "+12.4%".
   const plantsDeltaPct = plantsLastMonth > 0 ? ((plantsThisMonth - plantsLastMonth) / plantsLastMonth) * 100 : null;
+  const harvestLabel = totals.yieldKg >= 1000
+    ? `${(totals.yieldKg / 1000).toFixed(1)} t`
+    : `${totals.yieldKg.toFixed(2)} kg`;
 
   const stats = [
-    ["FARMS ANALYZED", String(records.length), `+${farmsThisMonth} this month`, "↗"],
-    ["PLANTS DETECTED", totals.plants.toLocaleString(), plantsDeltaPct === null ? "" : `${plantsDeltaPct >= 0 ? "+" : ""}${plantsDeltaPct.toFixed(1)}% vs last month`, "⌁"],
-    ["AVG. CROP DENSITY", totals.density.toLocaleString(), "plants / hectare", "▦"],
-    ["ESTIMATED HARVEST", `${(totals.yieldKg / 1000).toFixed(1)} t`, "Across all fields", "◒"],
+    ["FARMS ANALYZED", String(records.length), `+${farmsThisMonth} ${t("this month")}`, "↗"],
+    ["PLANTS DETECTED", totals.plants.toLocaleString(), plantsDeltaPct === null ? "" : `${plantsDeltaPct >= 0 ? "+" : ""}${plantsDeltaPct.toFixed(1)}% ${t("vs last month")}`, "⌁"],
+    ["AVG. CROP DENSITY", totals.density.toLocaleString(), t("plants / hectare"), "▦"],
+    ["ESTIMATED HARVEST", harvestLabel, t("Across all fields"), "◒"],
   ];
 
   // Records written before Phases P/R/S (or by an older backend build)
@@ -564,15 +619,10 @@ function Dashboard({ records, totals, onAnalyze, onHistory, onCompare }: { recor
   const withTexture = records.filter((r) => r.texture_pattern);
   const patchyCount = withTexture.filter((r) => r.texture_pattern === "patchy").length;
   const tiltCorrectedCount = records.filter((r) => r.tilt_corrected).length;
-  const withSize = records.filter((r) => r.plant_size_uniformity_score != null);
-  const avgSizeUniformity = withSize.length
-    ? withSize.reduce((n, r) => n + (r.plant_size_uniformity_score ?? 0), 0) / withSize.length
-    : null;
-  const hasAiSignals = withTexture.length > 0 || tiltCorrectedCount > 0 || withSize.length > 0;
+  const hasAiSignals = withTexture.length > 0 || tiltCorrectedCount > 0;
   const aiSignalStats = [
-    ["PATCHY TEXTURE FLAGGED", withTexture.length ? `${patchyCount} / ${withTexture.length}` : "—", "possible disease/pest pattern", "◆"],
-    ["PERSPECTIVE CORRECTED", String(tiltCorrectedCount), "non-nadir photos straightened", "⇕"],
-    ["AVG. SIZE UNIFORMITY", avgSizeUniformity == null ? "—" : `${Math.round(avgSizeUniformity)}/100`, "stand establishment evenness", "⊞"],
+    ["PATCHY TEXTURE FLAGGED", withTexture.length ? `${patchyCount} / ${withTexture.length}` : "—", t("possible disease/pest pattern"), "◆"],
+    ["PERSPECTIVE CORRECTED", String(tiltCorrectedCount), t("non-nadir photos straightened"), "⇕"],
   ];
 
   // The hero card used to show hardcoded numbers (48/92/71, "94.8%",
@@ -587,13 +637,20 @@ function Dashboard({ records, totals, onAnalyze, onHistory, onCompare }: { recor
   const latestForHero = records[0];
   const vegetationSignalLabel = (score: number) => (score >= 70 ? "Strong" : score >= 40 ? "Moderate" : "Weak");
 
-  const allBuckets = bucketHealthByMonth(records);
   const cutoff = period === "all" ? -Infinity : thisMonth - (Number(period) - 1);
-  const buckets = allBuckets.filter((b) => b.key >= cutoff);
-  const points = buckets.map((b, i) => ({
-    x: buckets.length > 1 ? (i / (buckets.length - 1)) * 100 : 50,
-    y: 100 - b.avgHealth,
-    label: b.label,
+  // Plot every analysis rather than collapsing same-month analyses into one
+  // bucket. This keeps the trend visible after repeated analyses in a month.
+  const calendarRecords = records.filter((r) => monthKey(new Date(r.createdAt)) >= cutoff);
+  const trendRecords = calendarRecords.length || period === "all"
+    ? calendarRecords
+    : records.slice(0, Number(period)).reverse();
+  const orderedRecords = [...trendRecords].sort((a, b) =>
+    new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+  );
+  const points = orderedRecords.map((r, i) => ({
+    x: orderedRecords.length > 1 ? (i / (orderedRecords.length - 1)) * 100 : 50,
+    y: Math.max(0, Math.min(100, 100 - r.health_score)),
+    label: new Date(r.createdAt).toLocaleDateString("en-US", { month: "short", day: "numeric" }),
   }));
   const linePath = points.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x},${p.y}`).join(" ");
   const areaPath = points.length > 1
@@ -602,21 +659,76 @@ function Dashboard({ records, totals, onAnalyze, onHistory, onCompare }: { recor
 
   return <div className="page">
     <section className="hero">
-      <div><span className="tag"><span className="pulse" /> LIVE CROP MONITORING</span><h2>Turn aerial imagery into<br /><em>actionable crop insight.</em></h2><p>Analyze plant populations, vegetation health, crop coverage and projected harvests—powered by computer vision.</p><div><button className="primary" onClick={onAnalyze}>Analyze drone imagery <span>→</span></button><button className="ghost" onClick={onHistory}>View recent fields</button></div><button className="hero-compare-link" onClick={onCompare}>⇄ New: compare two flights to see what changed <span>→</span></button></div>
-      <div className="field-card"><div className="field-image">{latestForHero && <div className="scanline" />}{recentForHero.map((r, i) => <span key={r.id} className={`bbox b${i + 1}`} title={`${r.name}: health ${Math.round(r.health_score)}/100`}>{Math.round(r.health_score)}</span>)}<div className="map-label">{latestForHero ? "◉ RECENT FIELD HEALTH" : "◉ NO ANALYSES YET"}</div></div><div className="field-caption">{latestForHero ? <><span><small>LATEST CONFIDENCE</small><b>{latestForHero.confidence_score.toFixed(1)}%</b></span><span><small>VEGETATION SIGNAL</small><b className="green">{vegetationSignalLabel(latestForHero.vegetation_score)}</b></span></> : <><span><small>LATEST CONFIDENCE</small><b>—</b></span><span><small>VEGETATION SIGNAL</small><b>—</b></span></>}</div></div>
+      <div><span className="tag"><span className="pulse" /> {t("LIVE CROP MONITORING")}</span><h2>{t("Turn aerial imagery into")}<br /><em>{t("actionable crop insight.")}</em></h2><p>{t("Analyze plant populations, vegetation health, crop coverage and projected harvests—powered by computer vision.")}</p><div><button className="primary" onClick={onAnalyze}>{t("Analyze drone imagery")} <span>→</span></button><button className="ghost" onClick={onHistory}>{t("View recent fields")}</button></div></div>
+      <div className="field-card"><div className="field-image">{latestForHero && <div className="scanline" />}{recentForHero.map((r, i) => <span key={r.id} className={`bbox b${i + 1}`} title={`${r.name}: health ${Math.round(r.health_score)}/100`}>{Math.round(r.health_score)}</span>)}<div className="map-label">{latestForHero ? `◉ ${t("RECENT FIELD HEALTH")}` : `◉ ${t("NO ANALYSES YET")}`}</div></div><div className="field-caption">{latestForHero ? <><span><small>{t("LATEST CONFIDENCE")}</small><b>{latestForHero.confidence_score.toFixed(1)}%</b></span><span><small>{t("VEGETATION SIGNAL")}</small><b className="green">{t(vegetationSignalLabel(latestForHero.vegetation_score))}</b></span></> : <><span><small>{t("LATEST CONFIDENCE")}</small><b>—</b></span><span><small>{t("VEGETATION SIGNAL")}</small><b>—</b></span></>}</div></div>
     </section>
-    <div className="section-title"><span>Portfolio performance</span><small>Updated moments ago</small></div>
-    <section className="stat-grid">{stats.map(([label, value, sub, icon]) => <article className="stat" key={label}><div className="stat-icon">{icon}</div><small>{label}</small><strong>{value}</strong><p>{sub}</p></article>)}</section>
-    {hasAiSignals && <><div className="section-title"><span>AI signal coverage</span><small>From texture, tilt, and per-plant size analysis</small></div>
-    <section className="stat-grid ai-signal-grid">{aiSignalStats.map(([label, value, sub, icon]) => <article className="stat" key={label}><div className="stat-icon">{icon}</div><small>{label}</small><strong>{value}</strong><p>{sub}</p></article>)}</section></>}
+    <div className="section-title"><span>{t("Portfolio performance")}</span><small>{t("Updated moments ago")}</small></div>
+    <section className="stat-grid">{stats.map(([label, value, sub, icon]) => <article className="stat" key={label}><div className="stat-icon">{icon}</div><small>{t(label)}</small><strong>{value}</strong><p>{sub}</p></article>)}</section>
+    {hasAiSignals && <><div className="section-title"><span>{t("AI signal coverage")}</span><small>{t("From texture, tilt, and per-plant size analysis")}</small></div>
+    <section className="stat-grid ai-signal-grid">{aiSignalStats.map(([label, value, sub, icon]) => <article className="stat" key={label}><div className="stat-icon">{icon}</div><small>{t(label)}</small><strong>{value}</strong><p>{sub}</p></article>)}</section></>}
     <section className="lower-grid">
-      <article className="panel chart-panel"><div className="panel-head"><div><h3>Crop health trend</h3><p>Average health score across analyzed fields</p></div><select aria-label="Time period" value={period} onChange={(e) => setPeriod(e.target.value as "3" | "6" | "12" | "all")}><option value="3">Last 3 months</option><option value="6">Last 6 months</option><option value="12">Last 12 months</option><option value="all">All time</option></select></div>{points.length === 0 ? <p style={{fontSize: 10, color: "#7a837c", margin: "20px 0"}}>No analyses yet — run one to start tracking health trends.</p> : <div className="chart"><div className="yaxis"><span>100</span><span>75</span><span>50</span><span>25</span></div><div className="chart-area"><div className="gridlines" /><div className="trend-chart"><svg viewBox="0 0 100 100" preserveAspectRatio="none">{areaPath && <path d={areaPath} fill="#8cbc7640" stroke="none" />}{points.length > 1 && <path d={linePath} fill="none" stroke="#397452" strokeWidth={2} vectorEffect="non-scaling-stroke" />}</svg>{points.map((p, i) => <div key={i} className="point" style={{left: `${p.x}%`, top: `${p.y}%`}} />)}</div><div className="xaxis">{points.map((p, i) => <span key={i}>{p.label}</span>)}</div></div></div>}</article>
-      <article className="panel recent"><div className="panel-head"><div><h3>Recent analyses</h3><p>Latest processed imagery</p></div><button onClick={onHistory}>View all →</button></div>{records.length === 0 && <p style={{fontSize: 10, color: "#7a837c"}}>No analyses yet.</p>}{records.slice(0, 3).map((r, i) => <div className="recent-row" key={r.id}><div className={`thumb t${i + 1}`} /><span><b>{r.name}</b><small>{r.crop} · {r.date}</small></span><div className="health-ring" style={{"--score": `${r.health_score * 3.6}deg`} as React.CSSProperties}>{Math.round(r.health_score)}</div></div>)}</article>
+      <article className="panel chart-panel"><div className="panel-head"><div><h3>{t("Crop health trend")}</h3><p>{t("Average health score across analyzed fields")}</p></div><select aria-label="Time period" value={period} onChange={(e) => setPeriod(e.target.value as "3" | "6" | "12" | "all")}><option value="3">{t("Last 3 months")}</option><option value="6">{t("Last 6 months")}</option><option value="12">{t("Last 12 months")}</option><option value="all">{t("All time")}</option></select></div>{points.length === 0 ? <p style={{fontSize: 10, color: "#7a837c", margin: "20px 0"}}>{t("No analyses yet — run one to start tracking health trends.")}</p> : <div className="chart"><div className="yaxis"><span>100</span><span>75</span><span>50</span><span>25</span></div><div className="chart-area"><div className="gridlines" /><div className="trend-chart"><svg viewBox="0 0 100 100" preserveAspectRatio="none">{areaPath && <path d={areaPath} fill="#8cbc7640" stroke="none" />}{points.length > 1 && <path d={linePath} fill="none" stroke="#397452" strokeWidth={2} vectorEffect="non-scaling-stroke" />}</svg>{points.map((p, i) => <div key={i} className="point" style={{left: `${p.x}%`, top: `${p.y}%`}} />)}</div><div className="xaxis">{points.map((p, i) => <span key={i}>{p.label}</span>)}</div></div></div>}</article>
+      <article className="panel recent"><div className="panel-head"><div><h3>{t("Recent analyses")}</h3><p>{t("Latest processed imagery")}</p></div><button onClick={onHistory}>{t("View all →")}</button></div>{records.length === 0 && <p style={{fontSize: 10, color: "#7a837c"}}>{t("No analyses yet.")}</p>}{records.slice(0, 3).map((r, i) => <div className="recent-row" key={r.id}><div className={`thumb t${i + 1}`} /><span><b>{r.name}</b><small>{t(r.crop)} · {r.date}</small></span><div className="health-ring" style={{"--score": `${r.health_score * 3.6}deg`} as React.CSSProperties}>{Math.round(r.health_score)}</div></div>)}</article>
     </section>
   </div>;
 }
 
-function Upload(p: any) {
+function AuthModal({ initialMode, onClose, onSuccess }: { initialMode: "signin" | "signup"; onClose: () => void; onSuccess: (user: AuthUser) => void }) {
+  const [mode, setMode] = useState(initialMode);
+  const [email, setEmail] = useState("");
+  const [username, setUsername] = useState("");
+  const [occupation, setOccupation] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  async function submit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (mode === "signup" && password !== confirmPassword) {
+      setError("Passwords do not match.");
+      return;
+    }
+    setLoading(true);
+    setError("");
+    try {
+      const response = await fetch(`/api/auth/${mode === "signup" ? "register" : "login"}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, username, occupation, password }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.detail || "Authentication failed.");
+      onSuccess(body.user);
+    } catch (authError) {
+      setError(authError instanceof Error ? authError.message : "Authentication failed.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return <div className="auth-backdrop" onMouseDown={onClose}>
+    <section className="auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-title" onMouseDown={(event) => event.stopPropagation()}>
+      <button type="button" className="auth-close" onClick={onClose} aria-label="Close">×</button>
+      <span className="auth-kicker">AGRISIGHT ACCOUNT</span>
+      <h2 id="auth-title">{mode === "signin" ? "Welcome back" : "Create your account"}</h2>
+      <p>{mode === "signin" ? "Sign in to access your field intelligence." : "Create an account to keep your analyses together."}</p>
+      <div className="auth-tabs"><button type="button" className={mode === "signin" ? "active" : ""} onClick={() => { setMode("signin"); setError(""); }}>Sign In</button><button type="button" className={mode === "signup" ? "active" : ""} onClick={() => { setMode("signup"); setError(""); }}>Sign Up</button></div>
+      {error && <div className="auth-error" role="alert">{error}</div>}
+      <form onSubmit={submit}>
+        {mode === "signup" && <label>Username<input type="text" value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="name" maxLength={80} required disabled={loading} /></label>}
+        {mode === "signup" && <label>Occupation<input type="text" value={occupation} onChange={(event) => setOccupation(event.target.value)} autoComplete="organization-title" maxLength={120} required disabled={loading} /></label>}
+        <label>Email address<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" required disabled={loading} /></label>
+        <label>Password<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={mode === "signin" ? "current-password" : "new-password"} minLength={mode === "signup" ? 8 : undefined} required disabled={loading} /></label>
+        {mode === "signup" && <label>Confirm password<input type="password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} autoComplete="new-password" minLength={8} required disabled={loading} /></label>}
+        <button className="primary auth-submit" type="submit" disabled={loading}>{loading ? "Please wait..." : mode === "signin" ? "Sign In" : "Create Account"}</button>
+      </form>
+    </section>
+  </div>;
+}
+
+function LegacyUpload(p: any) {
+  const { t } = p;
   // area (p.area) is always stored in hectares, matching the backend
   // contract -- only the displayed number and unit label switch with the
   // preference. Both crop and area are set by AI inspection (see
@@ -627,14 +739,31 @@ function Upload(p: any) {
     ha !== "" && !Number.isNaN(Number(ha))
       ? String(Math.round(Number(ha) * (p.areaUnit === "acres" ? ACRES_PER_HA : 1) * 100) / 100)
       : ha;
+  const areaFactor = p.areaUnit === "acres" ? ACRES_PER_HA : 1;
+  const setDisplayedArea = (value: string) => {
+    const numeric = Number(value);
+    p.setArea(value === "" || Number.isNaN(numeric) ? "" : String(numeric / areaFactor));
+  };
 
-  return <div className="page narrow"><div className="steps steps-2"><span className="done">1</span><i /><span>2</span><small>Upload imagery</small><small>AI analysis</small></div>
-    <section className="upload-grid"><article className="panel upload-panel"><h3>Drone imagery</h3><p>Upload a high-resolution aerial image of your field.</p><div className={`dropzone ${p.preview ? "has-image" : ""}`} onClick={() => p.inputRef.current?.click()} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); p.onFile(e.dataTransfer.files[0]); }}>{p.preview ? <img src={p.preview} alt="Selected aerial field" /> : <><div className="upload-icon">↥</div><b>Drop your drone image here</b><span>or click to browse your files</span><small>JPG or PNG · Maximum 20 MB</small></>}{p.inspecting && <span className="inspect-status"><span className="spinner" /> AI is reading crop type and field area…</span>}<input ref={p.inputRef} hidden type="file" accept="image/png,image/jpeg" onChange={(e) => p.onFile(e.target.files?.[0])} /></div>{p.file && <div className="file-pill"><span>✓</span><div><b>{p.file.name}</b><small>{(p.file.size / 1048576).toFixed(2)} MB · Ready for analysis</small></div><button onClick={(e) => { e.stopPropagation(); p.inputRef.current?.click(); }}>Replace</button></div>}</article>
-    <article className="panel form-panel"><h3>AI-assisted analysis</h3><p>No setup needed — crop type, field area and yield are predicted from the photo itself.</p><label>FIELD NAME (OPTIONAL)<input value={p.fieldName} onChange={(e) => p.setFieldName(e.target.value)} placeholder="e.g. West Field" /></label>{p.file && <div className="ai-predict-summary">{p.inspecting ? <span><span className="spinner" /> Detecting crop type and field area…</span> : <><span>AI detected: <b>{p.crop}</b> · <b>{toDisplayArea(p.area)} {unit}</b> (estimated)</span><small>Not sure this is right? You can adjust it from the Results screen after analysis.</small></>}</div>}{p.file && !p.inspecting && p.areaSource === "unavailable" && <div className="parameter-note"><b>Couldn't measure ground area from this photo</b><span>No altitude data and no visible row pattern to measure against. If you know the drone's flight altitude, enter it below for a more accurate area — otherwise a default area estimate is used.</span><div className="altitude-inline"><input type="number" min="1" step="1" placeholder="Flight altitude (m)" value={p.manualAltitude} onChange={(e) => p.setManualAltitude(e.target.value)} /><button type="button" className="ghost" onClick={p.onEstimateAltitude} disabled={!p.manualAltitude || Number(p.manualAltitude) <= 0}>Estimate</button></div></div>}<div className="tech-note"><b>⌁ RGB health analysis</b><span>The uploaded image is measured for green vegetation coverage using three independent RGB indices (Excess Green, VARI, ExGR) that must agree before a pixel counts as vegetation. Non-green areas are treated as bare soil or stressed ground, not classified by color. Results are visual indicators—not a laboratory diagnosis.</span></div>{p.error && <div className="tech-note error-note"><b>⚠ Analysis failed</b><span>{p.error}</span></div>}<button className="primary full" disabled={!p.file || p.analyzing || p.inspecting} onClick={p.run}>{p.analyzing ? <><span className="spinner" /> Running computer-vision pipeline…</> : <>Run image analysis <span>→</span></>}</button></article></section>
+  return <div className="page narrow"><div className="steps steps-2"><span className="done">1</span><i /><span className="done">2</span><small>{t("Upload imagery")}</small><small>{t("AI-assisted analysis")}</small></div>
+    <section className="upload-grid"><article className="panel upload-panel"><h3>{t("Drone imagery")}</h3><p>{t("Upload a high-resolution aerial image of your field.")}</p><div className={`dropzone ${p.preview ? "has-image" : ""}`} onClick={() => p.inputRef.current?.click()} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); p.onFile(e.dataTransfer.files[0]); }}>{p.preview ? <img src={p.preview} alt="Selected aerial field" /> : <><div className="upload-icon">↥</div><b>{t("Drop your drone image here")}</b><span>{t("or click to browse your files")}</span><small>{t("JPG or PNG · Maximum 20 MB")}</small></>}{p.inspecting && <span className="inspect-status"><span className="spinner" /> {t("AI is reading crop type and field area…")}</span>}<input ref={p.inputRef} hidden type="file" accept="image/png,image/jpeg" onChange={(e) => p.onFile(e.target.files?.[0])} /></div>{p.file && <div className="file-pill"><span>✓</span><div><b>{p.file.name}</b><small>{(p.file.size / 1048576).toFixed(2)} MB · {t("Ready for analysis")}</small></div><button onClick={(e) => { e.stopPropagation(); p.inputRef.current?.click(); }}>{t("Replace")}</button></div>}</article>
+    <article className="panel form-panel"><h3>{t("AI-assisted analysis")}</h3><p>{t("No setup needed — crop type, field area and yield are predicted from the photo itself.")}</p><label>{t("FIELD NAME (OPTIONAL)")}<input value={p.fieldName} onChange={(e) => p.setFieldName(e.target.value)} placeholder={t("e.g. West Field")} /></label>{p.file && <div className="ai-predict-summary">{p.inspecting ? <span><span className="spinner" /> {t("Detecting crop type and field area…")}</span> : <><span>{t("AI detected:")} <b>{t(p.crop)}</b> · <b>{toDisplayArea(p.area)} {t(p.areaUnit === "acres" ? "Acres" : "Hectares (ha)")}</b> ({t("estimated")})</span><small>{t("Not sure this is right? You can adjust it from the Results screen after analysis.")}</small></>}</div>}{p.file && !p.inspecting && p.areaSource === "unavailable" && <div className="parameter-note"><b>{t("Couldn't measure ground area from this photo")}</b><span>{t("No altitude data and no visible row pattern to measure against. If you know the drone's flight altitude, enter it below for a more accurate area — otherwise a default area estimate is used.")}</span><div className="altitude-inline"><input type="number" min="1" step="1" placeholder={t("Flight altitude (m)")} value={p.manualAltitude} onChange={(e) => p.setManualAltitude(e.target.value)} /><button type="button" className="ghost" onClick={p.onEstimateAltitude} disabled={!p.manualAltitude || Number(p.manualAltitude) <= 0}>Estimate</button></div></div>}<div className="tech-note"><b>⌁ {t("Vegetation health screening (RGB)")}</b><span>{t("The uploaded image is measured for green vegetation coverage using three independent RGB indices (Excess Green, VARI, ExGR) that must agree before a pixel counts as vegetation. Non-green areas are treated as bare soil or stressed ground, not classified by color. Results are visual indicators—not a laboratory diagnosis.")}</span></div>{p.error && <div className="tech-note error-note"><b>⚠ {t("Analysis failed")}</b><span>{p.error}</span></div>}<button className="primary full" disabled={!p.file || p.analyzing || p.inspecting} onClick={p.run}>{p.analyzing ? <><span className="spinner" /> {t("Running computer-vision pipeline…")}</> : <>{t("Run image analysis")} <span>→</span></>}</button></article></section>
   </div>;
 }
 
-// Human-readable label + confidence tier for each area_source the backend
+function Upload(p: any) {
+  const { t } = p;
+  const areaFactor = p.areaUnit === "acres" ? ACRES_PER_HA : 1;
+  const displayArea = p.area === "" ? "" : String(Math.round(Number(p.area) * areaFactor * 100) / 100);
+  const setDisplayArea = (value: string) => p.setArea(value === "" ? "" : String(Number(value) / areaFactor));
+
+  return <div className="page narrow"><div className="steps steps-2"><span className="done">1</span><i /><span className="done">2</span><small>{t("Upload imagery")}</small><small>{t("AI-assisted analysis")}</small></div>
+    <section className="upload-grid"><article className="panel upload-panel"><h3>{t("Drone imagery")}</h3><p>{t("Upload a high-resolution aerial image of your field.")}</p><div className={`dropzone ${p.preview ? "has-image" : ""}`} onClick={() => p.inputRef.current?.click()} onDragOver={(event: React.DragEvent) => event.preventDefault()} onDrop={(event: React.DragEvent) => { event.preventDefault(); p.onFile(event.dataTransfer.files[0]); }}>{p.preview ? <img src={p.preview} alt="Selected aerial field" /> : <><div className="upload-icon">^</div><b>{t("Drop your drone image here")}</b><span>{t("or click to browse your files")}</span><small>{t("JPG or PNG · Maximum 20 MB")}</small></>}{p.inspecting && <span className="inspect-status"><span className="spinner" /> {t("AI is reading crop type and field area…")}</span>}<input ref={p.inputRef} hidden type="file" accept="image/png,image/jpeg" onChange={(event) => p.onFile(event.target.files?.[0])} /></div>{p.file && <div className="file-pill"><span>✓</span><div><b>{p.file.name}</b><small>{(p.file.size / 1048576).toFixed(2)} MB · {t("Ready for analysis")}</small></div><button type="button" onClick={(event) => { event.stopPropagation(); p.inputRef.current?.click(); }}>{t("Replace")}</button></div>}</article>
+    <article className="panel form-panel"><h3>{t("Field parameters")}</h3><p>{t("These details calibrate density and yield estimates.")}</p><label>{t("FIELD NAME (OPTIONAL)")}<input value={p.fieldName} onChange={(event) => p.setFieldName(event.target.value)} placeholder={t("e.g. West Field")} /></label><label>{t("CROP TYPE")}<select value={p.crop} onChange={(event) => p.setCrop(event.target.value)}>{SUPPORTED_CROPS.map((crop) => <option key={crop} value={crop}>{t(crop)}</option>)}</select>{p.cropSuggested && <small className="suggested-tag">AI suggestion — editable</small>}</label><label>{t("FIELD AREA (HA)")}<input type="number" min=".01" step=".01" value={displayArea} onChange={(event) => setDisplayArea(event.target.value)} />{p.areaSuggested && <small className="suggested-tag">AI suggestion — editable</small>}</label><div className="quick-values"><span>{t("Quick area")}</span>{[0.5, 1, 2, 5].map((value) => <button type="button" key={value} className={Number(displayArea) === value ? "chosen" : ""} onClick={() => setDisplayArea(String(value))}>{value} {p.areaUnit === "acres" ? "ac" : "ha"}</button>)}</div><label>{t("Average yield per plant (kg)")}<input type="number" min="0" step=".001" value={p.averageYield} onChange={(event) => p.setAverageYield(event.target.value)} placeholder="Auto" /><small className="field-help">{t("Optional farm-specific override")}</small></label>{p.file && <div className="ai-predict-summary">{p.inspecting ? <span><span className="spinner" /> {t("Detecting crop type and field area…")}</span> : <><span>{t("AI suggested:")} <b>{t(p.crop)}</b> · <b>{displayArea} {p.areaUnit === "acres" ? "ac" : "ha"}</b></span><small>{t("Values remain editable before analysis.")}</small></>}</div>}{p.file && !p.inspecting && p.areaSource === "unavailable" && <div className="parameter-note"><b>{t("Couldn't measure ground area from this photo")}</b><span>{t("No altitude data and no visible row pattern to measure against. If you know the drone's flight altitude, enter it below for a more accurate area — otherwise a default area estimate is used.")}</span><div className="altitude-inline"><input type="number" min="1" step="1" placeholder={t("Flight altitude (m)")} value={p.manualAltitude} onChange={(event) => p.setManualAltitude(event.target.value)} /><button type="button" className="ghost" onClick={p.onEstimateAltitude} disabled={!p.manualAltitude || Number(p.manualAltitude) <= 0}>Estimate</button></div></div>}<div className="tech-note"><b>RGB</b><span>{t("The uploaded image is measured for green vegetation coverage using three independent RGB indices (Excess Green, VARI, ExGR) that must agree before a pixel counts as vegetation. Non-green areas are treated as bare soil or stressed ground, not classified by color. Results are visual indicators—not a laboratory diagnosis.")}</span></div>{p.error && <div className="tech-note error-note"><b>⚠ {t("Analysis failed")}</b><span>{p.error}</span></div>}<button className="primary full" disabled={!p.file || p.analyzing || p.inspecting || !p.crop || Number(p.area) <= 0} onClick={p.run}>{p.analyzing ? <><span className="spinner" /> {t("Running computer-vision pipeline…")}</> : <>{t("Run image analysis")} <span>→</span></>}</button></article></section>
+  </div>;
+}
+
+// Human-readable label + confidence tier for each area_source
 // can return (see backend/app/services/field_area_estimator.py) -- shown
 // in Results so a fallback/default estimate reads differently from a real
 // measurement, instead of both looking equally authoritative.
@@ -667,7 +796,7 @@ function confidenceTier(confidence: number | null): "high" | "medium" | "low" {
 
 type ResultsPatch = Pick<Analysis, "crop" | "fieldAreaHectares" | "crop_density" | "estimated_yield" | "average_yield_per_plant_kg" | "cropConfidence" | "areaSource" | "areaLowHectares" | "areaHighHectares">;
 
-function Results({ data, file, areaUnit, onNew, onAdjust }: { data: Analysis; file: File | null; areaUnit: "ha" | "acres"; onNew: () => void; onAdjust: (patch: ResultsPatch) => void }) {
+function Results({ data, file, areaUnit, onNew, onAdjust, t }: { data: Analysis; file: File | null; areaUnit: "ha" | "acres"; onNew: () => void; onAdjust: (patch: ResultsPatch) => void; t: (k: string) => string }) {
   const cropTier = confidenceTier(data.cropConfidence);
   const areaInfo = data.areaSource ? AREA_SOURCE_INFO[data.areaSource] : undefined;
   // No entry in AREA_SOURCE_INFO means "unavailable" (or inspection never
@@ -734,6 +863,11 @@ function Results({ data, file, areaUnit, onNew, onAdjust }: { data: Analysis; fi
   }
   const densityValue = areaUnit === "acres" ? data.crop_density / ACRES_PER_HA : data.crop_density;
   const densityLabel = areaUnit === "acres" ? "plants / acre" : "plants / hectare";
+  const displayedPlantCount = data.estimated_plant_count ?? data.plant_count;
+  const plantCountLabel = data.estimated_plant_count != null ? "EST. PLANT POPULATION" : "PLANTS DETECTED";
+  const plantCountNote = data.estimated_plant_count != null
+    ? `${data.plant_count.toLocaleString()} directly detected · coverage-based estimate`
+    : "directly detected";
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
   const [tab, setTab] = useState<"detection" | "segmentation" | "heatmap">("detection");
@@ -761,19 +895,19 @@ function Results({ data, file, areaUnit, onNew, onAdjust }: { data: Analysis; fi
   // for the count.
   const showBoxLabels = data.detections.length <= 15;
 
-  const healthLabel = data.health_score >= 80 ? "Healthy vegetation" : data.health_score >= 55 ? "Moderate / mixed health" : "Poor or stressed vegetation";
-  const healthCopy = data.health_score >= 80
-    ? "The image contains a strong, continuous green canopy."
-    : data.health_score >= 55
-      ? "Green crop is present, but gaps or stressed vegetation reduce the score."
-      : "Low green coverage was detected, which can indicate exposed soil, sparse growth, or discolored vegetation.";
+  const healthLabel = data.health_score >= 70 ? "Healthy vegetation" : data.health_score >= 45 ? "Moderate / mixed health" : "Poor or stressed vegetation";
+  const healthCopy = data.health_score >= 70
+    ? "The image contains predominantly green crop vegetation."
+    : data.health_score >= 45
+      ? "Green crop is present, with some gaps or lower-coverage areas visible in the image."
+      : "Low crop greenness or coverage was detected, which can indicate exposed soil, sparse growth, or discolored vegetation.";
   // Texture only changes the recommendation once health has already
   // dropped -- a healthy field's texture pattern isn't actionable either
   // way. Below that: patchy texture (disease/pest-shaped) and uniform
   // texture (drought/nutrient-shaped) point at genuinely different causes
   // for the same color-based health score, which is the whole reason
   // texture analysis exists here rather than color alone.
-  const recommendation = data.health_score >= 80
+  const recommendation = data.health_score >= 70
     ? "Maintain current management and compare the next flight for emerging changes."
     : data.texture_pattern === "patchy"
       ? "The patchy texture pattern in the affected areas is more consistent with disease or pest damage than a uniform stress -- inspect those irregular zones specifically, not just the low-vegetation areas overall."
@@ -790,6 +924,7 @@ function Results({ data, file, areaUnit, onNew, onAdjust }: { data: Analysis; fi
     try {
       const resultPayload: AnalysisResult = {
         plant_count: data.plant_count,
+        estimated_plant_count: data.estimated_plant_count,
         detection_method: data.detection_method,
         detection_note: data.detection_note,
         crop_density: data.crop_density,
@@ -824,12 +959,12 @@ function Results({ data, file, areaUnit, onNew, onAdjust }: { data: Analysis; fi
       formData.append("image", reportImage, file.name);
       formData.append("result", JSON.stringify(resultPayload));
       formData.append("field_name", data.name);
-      formData.append("crop_type", data.crop);
+      formData.append("crop_type", t(data.crop));
       formData.append("field_area_hectares", String(data.fieldAreaHectares));
       formData.append("analysis_date", data.date);
-      formData.append("health_label", healthLabel);
-      formData.append("health_copy", healthCopy);
-      formData.append("recommendation", recommendation);
+      formData.append("health_label", t(healthLabel));
+      formData.append("health_copy", t(healthCopy));
+      formData.append("recommendation", t(recommendation));
       const res = await fetch(`${API_BASE}/api/report`, { method: "POST", body: formData });
       if (!res.ok) throw new Error(await parseError(res, `Report generation failed (${res.status}).`));
       const blob = await res.blob();
@@ -848,7 +983,7 @@ function Results({ data, file, areaUnit, onNew, onAdjust }: { data: Analysis; fi
     }
   }
 
-  return <div className="page"><div className="result-top"><div><span className="success">✓ ANALYSIS SUCCESSFUL</span><p>{data.name} · {data.crop} · {data.date}</p></div><div><button className="ghost" onClick={exportReport} disabled={exporting || !file}>{exporting ? <><span className="spinner spinner-dark" /> Generating…</> : "Export report"}</button><button className="primary compact" onClick={onNew}>Analyze another</button></div></div>
+  return <div className="page">
     {exportError && <div className="tech-note error-note"><b>⚠ Export failed</b><span>{exportError}</span></div>}
     <div className="ai-confidence-row">
       <div className={`confidence-badge tier-${cropTier}`}>
@@ -874,26 +1009,17 @@ function Results({ data, file, areaUnit, onNew, onAdjust }: { data: Analysis; fi
         <button type="button" className="primary compact" onClick={saveAdjust} disabled={adjusting || !draftCrop || Number(draftArea) <= 0}>{adjusting ? <><span className="spinner" /> Recalculating…</> : "Save correction"}</button>
       </div>
     </div>}
-    <section className="result-metrics">{[["PLANT COUNT", data.plant_count.toLocaleString(), "detected plants"], ["CROP DENSITY", densityValue.toLocaleString(undefined, {maximumFractionDigits: 2}), densityLabel], ["CROP COVERAGE", `${data.crop_coverage}%`, "segmented area"], ["HEALTH SCORE", `${Math.round(data.health_score)}/100`, "strong vegetation"], ["EST. HARVEST", `${data.estimated_yield.toLocaleString()} kg`, `${(data.estimated_yield / 1000).toFixed(2)} metric tons${data.yield_size_factor !== 1 ? ` · size-adjusted ${data.yield_size_factor.toFixed(2)}×` : ""}`]].map(([a,b,c]) => <article key={a}><small>{a}</small><b>{b}</b><span>{c}</span></article>)}</section>
+    <section className="result-metrics">{[[plantCountLabel, displayedPlantCount.toLocaleString(), plantCountNote], ["CROP DENSITY", densityValue.toLocaleString(undefined, {maximumFractionDigits: 2}), densityLabel], ["CROP COVERAGE", `${data.crop_coverage}%`, "segmented area"], ["HEALTH SCORE", `${Math.round(data.health_score)}/100`, "strong vegetation"], ["EST. HARVEST", `${data.estimated_yield.toLocaleString()} kg`, `${(data.estimated_yield / 1000).toFixed(2)} metric tons${data.yield_size_factor !== 1 ? ` · size-adjusted ${data.yield_size_factor.toFixed(2)}×` : ""}`]].map(([a,b,c]) => <article key={a}><small>{a}</small><b>{b}</b><span>{c}</span></article>)}</section>
     <div className="method-warning" style={{margin: "0 0 18px"}}><b>Yield estimate</b><span>{data.yield_size_note ?? "A rough approximation: detected plants × a typical per-plant weight for this crop, adjusted for measured field coverage and health. Not a calibrated biomass model -- treat it as an order-of-magnitude planning number, not a harvest weigh-in."}</span></div>
-    <section className="vision-grid"><article className="panel vision-panel"><div className="panel-head"><div><h3>Computer vision output</h3><p>Detection and segmentation layers{data.tilt_corrected ? " · perspective corrected" : ""}{data.detection_method === "general_fallback" ? " · general-purpose detector used" : ""}</p></div><div className="seg-tabs"><button className={tab === "detection" ? "selected" : ""} onClick={() => setTab("detection")}>Detection</button><button className={tab === "segmentation" ? "selected" : ""} onClick={() => setTab("segmentation")}>Segmentation</button><button className={tab === "heatmap" ? "selected" : ""} onClick={() => setTab("heatmap")}>Heatmap</button></div></div><div className="result-image" ref={imageContainerRef}>{tab === "detection" && (data.analyzed_image ?? data.image) && <img src={data.analyzed_image ?? data.image} alt="Analyzed crop field" />}{tab === "segmentation" && <img src={data.segmentation_overlay} alt="Segmentation mask overlay" />}{tab === "heatmap" && <img src={data.heatmap_overlay} alt="Vegetation density heatmap" />}{tab === "detection" && transform && data.detections.map((d, i) => <span key={i} className="bbox" style={{ left: d.x1 * transform.scaleX - transform.offsetX, top: d.y1 * transform.scaleY - transform.offsetY, width: (d.x2 - d.x1) * transform.scaleX, height: (d.y2 - d.y1) * transform.scaleY }}>{showBoxLabels ? `${d.label} .${Math.round(d.confidence * 100)}` : ""}</span>)}{tab === "detection" && <div className="model-badge">{data.detection_method === "general_fallback" ? "GENERAL DETECTOR" : "YOLO DETECTIONS"} · {data.plant_count.toLocaleString()}</div>}{tab === "detection" && data.tilt_corrected && <div className="model-badge tilt-badge">⇕ TILT CORRECTED</div>}</div>{data.detection_method === "general_fallback" && <div className="method-warning" style={{margin: 16}}><b>⚠ General-purpose detector used</b><span>{data.detection_note}</span></div>}</article>
-    <article className={`panel insights health-${data.health_score >= 80 ? "good" : data.health_score >= 55 ? "mixed" : "poor"}`}><h3>Field intelligence</h3><p>Interpreted from visible RGB vegetation signals.</p><div className="score"><div className="score-ring" style={{"--score": `${data.health_score * 3.6}deg`} as React.CSSProperties}><span><b>{Math.round(data.health_score)}</b><small>/ 100</small></span></div><div><b>{healthLabel}</b><p>{healthCopy}</p></div></div><hr /><div className="insight-row"><span>GREEN VEGETATION RATIO</span><b>{data.vegetation_score.toFixed(1)}%</b></div><div className="bar"><i style={{width: `${data.vegetation_score}%`}} /></div><div className="insight-row"><span>TEXTURE PATTERN</span><b>{data.texture_pattern} · {data.texture_uniformity_score.toFixed(0)}%</b></div><div className={`bar texture-${data.texture_pattern}`}><i style={{width: `${data.texture_uniformity_score}%`}} /></div><div className="insight-row"><span>AVG. DETECTION CONFIDENCE</span><b>{data.confidence_score.toFixed(1)}%</b></div><div className="bar"><i style={{width: `${data.confidence_score}%`}} /></div><div className="method-warning"><b>RGB screening result</b><span>Color analysis can flag suspicious areas, but cannot distinguish disease from drought, mature crops, harvest residue, shadows, or soil without field context.</span></div><div className="method-warning"><b>Texture screening result</b><span>GLCM/Haralick texture on the segmented canopy separates uniform condition changes (drought, nutrient stress) from patchy ones (disease, pest damage) -- it flags a pattern, not a diagnosis.</span></div><div className="recommend"><b>Recommendation</b><p>{recommendation}</p></div></article></section>
-    {data.plant_size_stats && <section className="panel plant-size-panel"><h3>Per-plant size &amp; shape</h3><p>Measured from SAM's own per-plant masks, not just plant count -- a second axis of analysis independent of health/texture.</p>
-      <div className="plant-size-grid">
-        <article><small>MEAN CANOPY AREA</small><b>{data.plant_size_stats.mean_area_cm2.toLocaleString(undefined, {maximumFractionDigits: 0})} cm²</b><span>median {data.plant_size_stats.median_area_cm2.toLocaleString(undefined, {maximumFractionDigits: 0})} cm²</span></article>
-        <article><small>SIZE RANGE</small><b>{data.plant_size_stats.min_area_cm2.toLocaleString(undefined, {maximumFractionDigits: 0})}–{data.plant_size_stats.max_area_cm2.toLocaleString(undefined, {maximumFractionDigits: 0})} cm²</b><span>smallest to largest plant</span></article>
-        <article><small>SIZE UNIFORMITY</small><b>{data.plant_size_stats.size_uniformity_score.toFixed(0)}/100</b><span>{data.plant_size_stats.size_uniformity_score >= 70 ? "even stand establishment" : data.plant_size_stats.size_uniformity_score >= 40 ? "moderately uneven sizing" : "highly uneven sizing"}</span></article>
-        <article><small>MEAN ELONGATION</small><b>{data.plant_size_stats.mean_aspect_ratio.toFixed(2)}×</b><span>{data.plant_size_stats.mean_aspect_ratio <= 1.3 ? "compact / round canopy" : "narrow / elongated canopy"}</span></article>
-      </div>
-      <div className="method-warning"><b>Size/shape screening result</b><span>Low size uniformity across an otherwise healthy-looking field can point at uneven emergence timing, plant competition, or patchy stress that an averaged health score alone wouldn't show.</span></div>
-    </section>}
+    <section className="vision-grid"><article className="panel vision-panel"><div className="panel-head"><div><h3>Computer vision output</h3><p>Detection and segmentation layers{data.tilt_corrected ? " · perspective corrected" : ""}{data.detection_method === "general_fallback" ? " · general-purpose detector used" : ""}</p></div><div className="seg-tabs"><button className={tab === "detection" ? "selected" : ""} onClick={() => setTab("detection")}>Detection</button><button className={tab === "segmentation" ? "selected" : ""} onClick={() => setTab("segmentation")}>Segmentation</button><button className={tab === "heatmap" ? "selected" : ""} onClick={() => setTab("heatmap")}>Heatmap</button></div></div><div className="result-image analysis-result-image" ref={imageContainerRef}>{tab === "detection" && (data.analyzed_image ?? data.image) && <img src={data.analyzed_image ?? data.image} alt="Analyzed crop field" />}{tab === "segmentation" && <img src={data.segmentation_overlay} alt="Segmentation mask overlay" />}{tab === "heatmap" && <img src={data.heatmap_overlay} alt="Vegetation density heatmap" />}{tab === "detection" && transform && data.detections.map((d, i) => <span key={i} className="bbox" style={{ left: d.x1 * transform.scaleX - transform.offsetX, top: d.y1 * transform.scaleY - transform.offsetY, width: (d.x2 - d.x1) * transform.scaleX, height: (d.y2 - d.y1) * transform.scaleY }}>{showBoxLabels ? `${d.label} .${Math.round(d.confidence * 100)}` : ""}</span>)}{tab === "detection" && <div className="model-badge">{data.detection_method === "general_fallback" ? "GENERAL DETECTOR" : "YOLO DETECTIONS"} · {data.plant_count.toLocaleString()}{data.estimated_plant_count != null ? ` detected · est. ${data.estimated_plant_count.toLocaleString()}` : ""}</div>}{tab === "detection" && data.tilt_corrected && <div className="model-badge tilt-badge">⇕ TILT CORRECTED</div>}</div>{data.detection_method === "general_fallback" && <div className="method-warning" style={{margin: 16}}><b>⚠ General-purpose detector used</b><span>{data.detection_note}</span></div>}</article>
+    <article className={`panel insights health-${data.health_score >= 80 ? "good" : data.health_score >= 55 ? "mixed" : "poor"}`}><h3>Field intelligence</h3><p>Interpreted from visible RGB vegetation signals.</p><div className="score"><div className="score-ring" style={{"--score": `${data.health_score * 3.6}deg`} as React.CSSProperties}><span><b>{Math.round(data.health_score)}</b><small>/ 100</small></span></div><div><b>{healthLabel}</b><p>{healthCopy}</p></div></div><hr /><div className="insight-row"><span>VEGETATION GREENNESS</span><b>{data.vegetation_score.toFixed(1)}%</b></div><div className="bar"><i style={{width: `${data.vegetation_score}%`}} /></div><div className="insight-row"><span>TEXTURE UNIFORMITY</span><b>{data.texture_pattern} · {data.texture_uniformity_score.toFixed(0)}%</b></div><div className={`bar texture-${data.texture_pattern}`}><i style={{width: `${data.texture_uniformity_score}%`}} /></div><div className="insight-row"><span>ANALYSIS CONFIDENCE</span><b>{data.confidence_score.toFixed(1)}%</b></div><div className="bar"><i style={{width: `${data.confidence_score}%`}} /></div><div className="method-warning"><b>RGB screening result</b><span>Color analysis can flag suspicious areas, but cannot distinguish disease from drought, mature crops, harvest residue, shadows, or soil without field context.</span></div><div className="method-warning"><b>Texture screening result</b><span>GLCM/Haralick texture on the segmented canopy separates uniform condition changes (drought, nutrient stress) from patchy ones (disease, pest damage) -- it flags a pattern, not a diagnosis.</span></div><div className="recommend"><b>Recommendation</b><p>{recommendation}</p></div></article></section>
   </div>;
 }
 
-function History({ records, loading, error, onRetry, areaUnit }: { records: HistoryRow[]; loading: boolean; error: string | null; onRetry: () => void; areaUnit: "ha" | "acres" }) {
+function History({ records, loading, error, onRetry, areaUnit, t }: { records: HistoryRow[]; loading: boolean; error: string | null; onRetry: () => void; areaUnit: "ha" | "acres"; t: (k: string) => string }) {
   const [search, setSearch] = useState("");
   const [cropFilter, setCropFilter] = useState("all");
-  const densityHeader = areaUnit === "acres" ? "DENSITY / ACRE" : "DENSITY / HA";
+  const densityHeader = areaUnit === "acres" ? t("DENSITY / ACRE") : t("DENSITY / HA");
   const toDisplayDensity = (perHa: number) => (areaUnit === "acres" ? perHa / ACRES_PER_HA : perHa).toLocaleString(undefined, {maximumFractionDigits: 2});
 
   const cropOptions = Array.from(new Set(records.map((r) => r.crop))).sort();
@@ -904,13 +1030,13 @@ function History({ records, loading, error, onRetry, areaUnit }: { records: Hist
   );
   const isFiltered = query !== "" || cropFilter !== "all";
 
-  return <div className="page"><section className="panel history"><div className="panel-head"><div><h3>Analysis archive</h3><p>{loading ? "Loading…" : error ? "Unable to load history" : isFiltered ? `${filtered.length} of ${records.length} processed field surveys` : `${records.length} processed field surveys`}</p></div><div><input placeholder="Search fields…" value={search} onChange={(e) => setSearch(e.target.value)} /><select aria-label="Filter by crop" value={cropFilter} onChange={(e) => setCropFilter(e.target.value)}><option value="all">All crops</option>{cropOptions.map((c) => <option key={c} value={c}>{c}</option>)}</select></div></div>
+  return <div className="page"><section className="panel history"><div className="panel-head"><div><h3>{t("Field history")}</h3><p>{loading ? t("Loading…") : error ? t("Unable to load history") : isFiltered ? `${filtered.length} of ${records.length} processed field surveys` : `${records.length} processed field surveys`}</p></div><div><input placeholder={t("Search fields…")} value={search} onChange={(e) => setSearch(e.target.value)} /><select aria-label="Filter by crop" value={cropFilter} onChange={(e) => setCropFilter(e.target.value)}><option value="all">{t("All crops")}</option>{cropOptions.map((c) => <option key={c} value={c}>{t(c)}</option>)}</select></div></div>
     {error && <div className="tech-note error-note"><b>⚠ {error}</b><span><button className="ghost" onClick={onRetry}>Retry</button></span></div>}
-    {!error && <div className="table"><div className="tr th"><span>FIELD</span><span>DATE</span><span>PLANTS</span><span>{densityHeader}</span><span>HEALTH</span><span>EST. YIELD</span><span>SIGNALS</span></div>
-    {loading && <div className="tr"><span>Loading analysis history…</span></div>}
-    {!loading && records.length === 0 && <div className="tr"><span>No analyses yet. Run one from “New analysis”.</span></div>}
-    {!loading && records.length > 0 && filtered.length === 0 && <div className="tr"><span>No analyses match your search or filter.</span></div>}
-    {!loading && filtered.map((r, i) => <div className="tr" key={r.id}><span className="field-cell"><i className={`thumb t${i % 3 + 1}`} /><span><b>{r.name}</b><small>{r.crop}</small></span></span><span>{r.date}</span><span>{r.plant_count.toLocaleString()}</span><span>{toDisplayDensity(r.crop_density)}</span><span><em className="health-pill">● {Math.round(r.health_score)}</em></span><span><b>{r.estimated_yield.toLocaleString()} kg</b></span><span className="signals-cell">{r.texture_pattern && <em className={`signal-chip texture-${r.texture_pattern}`} title={`Texture: ${r.texture_pattern}`}>{r.texture_pattern}</em>}{r.tilt_corrected && <em className="signal-chip tilt" title="Perspective corrected">⇕</em>}{r.plant_size_uniformity_score != null && <em className="signal-chip size" title={`Size uniformity: ${Math.round(r.plant_size_uniformity_score)}/100`}>⊞ {Math.round(r.plant_size_uniformity_score)}</em>}{!r.texture_pattern && !r.tilt_corrected && r.plant_size_uniformity_score == null && <small className="field-help" style={{margin: 0}}>—</small>}</span></div>)}</div>}
+    {!error && <div className="table"><div className="tr th"><span>{t("FIELD")}</span><span>{t("DATE")}</span><span>{t("PLANTS")}</span><span>{densityHeader}</span><span>{t("HEALTH")}</span><span>{t("EST. HARVEST")}</span><span>{t("SIGNALS")}</span></div>
+    {loading && <div className="tr"><span>{t("Loading analysis history…")}</span></div>}
+    {!loading && records.length === 0 && <div className="tr"><span>{t("No analyses yet. Run one from “New analysis”.")}</span></div>}
+    {!loading && records.length > 0 && filtered.length === 0 && <div className="tr"><span>{t("No analyses match your search or filter.")}</span></div>}
+    {!loading && filtered.map((r, i) => <div className="tr" key={r.id}><span className="field-cell"><i className={`thumb t${i % 3 + 1}`} /><span><b>{r.name}</b><small>{t(r.crop)}</small></span></span><span>{r.date}</span><span>{r.plant_count.toLocaleString()}</span><span>{toDisplayDensity(r.crop_density)}</span><span><em className="health-pill">● {Math.round(r.health_score)}</em></span><span><b>{r.estimated_yield.toLocaleString()} kg</b></span><span className="signals-cell">{r.texture_pattern && <em className={`signal-chip texture-${r.texture_pattern}`} title={`Texture: ${r.texture_pattern}`}>{t(r.texture_pattern)}</em>}{r.tilt_corrected && <em className="signal-chip tilt" title="Perspective corrected">⇕</em>}{r.plant_size_uniformity_score != null && <em className="signal-chip size" title={`Size uniformity: ${Math.round(r.plant_size_uniformity_score)}/100`}>⊞ {Math.round(r.plant_size_uniformity_score)}</em>}{!r.texture_pattern && !r.tilt_corrected && r.plant_size_uniformity_score == null && <small className="field-help" style={{margin: 0}}>—</small>}</span></div>)}</div>}
   </section></div>;
 }
 
@@ -928,17 +1054,17 @@ type ComparisonResult = {
   warning: string | null;
 };
 
-function CompareDropzone({ label, hint, preview, onFile }: { label: string; hint: string; preview: string; onFile: (f?: File) => void }) {
+function CompareDropzone({ label, hint, preview, onFile, t }: { label: string; hint: string; preview: string; onFile: (f?: File) => void; t: (k: string) => string }) {
   const inputRef = useRef<HTMLInputElement>(null);
   return <article className="panel upload-panel compare-slot"><h3>{label}</h3><p>{hint}</p>
     <div className={`dropzone ${preview ? "has-image" : ""}`} onClick={() => inputRef.current?.click()} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); onFile(e.dataTransfer.files[0]); }}>
-      {preview ? <img src={preview} alt={`${label} field photo`} /> : <><div className="upload-icon">↥</div><b>Drop photo here</b><span>or click to browse</span></>}
+      {preview ? <img src={preview} alt={`${label} field photo`} /> : <><div className="upload-icon">↥</div><b>{t("Drop photo here")}</b><span>{t("or click to browse")}</span></>}
       <input ref={inputRef} hidden type="file" accept="image/png,image/jpeg" onChange={(e) => onFile(e.target.files?.[0])} />
     </div>
   </article>;
 }
 
-function Compare() {
+function Compare({ t }: { t: (k: string) => string }) {
   const [before, setBefore] = useState<File | null>(null);
   const [beforePreview, setBeforePreview] = useState("");
   const [after, setAfter] = useState<File | null>(null);
@@ -981,26 +1107,26 @@ function Compare() {
 
   return <div className="page narrow">
     <section className="upload-grid compare-grid">
-      <CompareDropzone label="Before" hint="An earlier flight over the same field." preview={beforePreview} onFile={chooseBefore} />
-      <CompareDropzone label="After" hint="A more recent flight over the same field." preview={afterPreview} onFile={chooseAfter} />
+      <CompareDropzone label={t("Before")} hint={t("An earlier flight over the same field.")} preview={beforePreview} onFile={chooseBefore} t={t} />
+      <CompareDropzone label={t("After")} hint={t("A more recent flight over the same field.")} preview={afterPreview} onFile={chooseAfter} t={t} />
     </section>
-    <div className="tech-note"><b>⇄ How this works</b><span>ORB feature matching finds points the two photos share, then a homography aligns the "before" photo onto the "after" photo's frame -- correcting for the drone not flying the exact same path twice. The aligned vegetation masks are then diffed directly: green marks new growth, red marks vegetation lost between the two flights.</span></div>
-    {error && <div className="tech-note error-note"><b>⚠ Comparison failed</b><span>{error}</span></div>}
-    <button className="primary full" disabled={!before || !after || comparing} onClick={runCompare}>{comparing ? <><span className="spinner" /> Aligning photos and diffing vegetation…</> : <>Compare flights <span>→</span></>}</button>
+    <div className="tech-note"><b>⇄ {t("How this works")}</b><span>{t("ORB feature matching finds points the two photos share, then a homography aligns the \"before\" photo onto the \"after\" photo's frame -- correcting for the drone not flying the exact same path twice. The aligned vegetation masks are then diffed directly: green marks new growth, red marks vegetation lost between the two flights.")}</span></div>
+    {error && <div className="tech-note error-note"><b>⚠ {t("Comparison failed")}</b><span>{error}</span></div>}
+    <button className="primary full" disabled={!before || !after || comparing} onClick={runCompare}>{comparing ? <><span className="spinner" /> {t("Aligning photos and diffing vegetation…")}</> : <>{t("Compare flights")} <span>→</span></>}</button>
 
-    {result && !result.alignment_ok && <div className="tech-note error-note" style={{marginTop: 18}}><b>⚠ Couldn't align these photos</b><span>{result.warning ?? "The two photos could not be confidently aligned."} Try two photos that clearly show the same field from a similar angle.</span></div>}
+    {result && !result.alignment_ok && <div className="tech-note error-note" style={{marginTop: 18}}><b>⚠ {t("Couldn't align these photos")}</b><span>{result.warning ? t(result.warning) : t("The two photos could not be confidently aligned.")} {t("Try two photos that clearly show the same field from a similar angle.")}</span></div>}
 
     {result && result.alignment_ok && <section className="compare-results">
-      <article className="panel vision-panel"><div className="panel-head"><div><h3>Change since last flight</h3><p>{result.keypoints_matched} matched features · {result.inlier_ratio.toFixed(0)}% alignment confidence</p></div></div>
-        <div className="result-image"><img src={result.diff_overlay} alt="Vegetation change diff overlay" /><div className="model-badge">◈ CHANGE OVERLAY</div></div>
-        <div className="compare-legend"><span><i className="legend-dot grow" /> New growth</span><span><i className="legend-dot lose" /> Vegetation lost</span><span><i className="legend-dot dim" /> Outside overlap (not compared)</span></div>
+      <article className="panel vision-panel"><div className="panel-head"><div><h3>{t("Change since last flight")}</h3><p>{result.keypoints_matched} {t("matched features")} · {result.inlier_ratio.toFixed(0)}% {t("alignment confidence")}</p></div></div>
+        <div className="result-image"><img src={result.diff_overlay} alt="Vegetation change diff overlay" /><div className="model-badge">◈ {t("CHANGE OVERLAY")}</div></div>
+        <div className="compare-legend"><span><i className="legend-dot grow" /> {t("New growth")}</span><span><i className="legend-dot lose" /> {t("Vegetation lost")}</span><span><i className="legend-dot dim" /> {t("Outside overlap (not compared)")}</span></div>
       </article>
-      <article className="panel insights"><h3>Change summary</h3><p>Measured within the region visible in both photos after alignment.</p><hr />
-        <div className="insight-row"><span>NEW GROWTH</span><b>{result.growth_percent.toFixed(1)}%</b></div><div className="bar"><i style={{width: `${result.growth_percent}%`, background: "#2f704c"}} /></div>
-        <div className="insight-row"><span>VEGETATION LOST</span><b>{result.loss_percent.toFixed(1)}%</b></div><div className="bar"><i style={{width: `${result.loss_percent}%`, background: "#b64c3c"}} /></div>
-        <div className="insight-row"><span>UNCHANGED</span><b>{result.unchanged_percent.toFixed(1)}%</b></div><div className="bar"><i style={{width: `${result.unchanged_percent}%`}} /></div>
-        {result.texture_shift_note && <div className="method-warning"><b>Canopy texture</b><span>{result.texture_uniformity_before != null && result.texture_uniformity_after != null && <>{Math.round(result.texture_uniformity_before)} → {Math.round(result.texture_uniformity_after)}/100 uniformity. </>}{result.texture_shift_note}</span></div>}
-        <div className="method-warning"><b>Alignment method</b><span>ORB keypoints + RANSAC homography. {result.keypoints_matched} inlier matches at {result.inlier_ratio.toFixed(0)}% agreement -- higher agreement means the alignment (and therefore the diff) is more trustworthy.</span></div>
+      <article className="panel insights"><h3>{t("Change summary")}</h3><p>{t("Measured within the region visible in both photos after alignment.")}</p><hr />
+        <div className="insight-row"><span>{t("NEW GROWTH")}</span><b>{result.growth_percent.toFixed(1)}%</b></div><div className="bar"><i style={{width: `${result.growth_percent}%`, background: "#2f704c"}} /></div>
+        <div className="insight-row"><span>{t("VEGETATION LOST")}</span><b>{result.loss_percent.toFixed(1)}%</b></div><div className="bar"><i style={{width: `${result.loss_percent}%`, background: "#b64c3c"}} /></div>
+        <div className="insight-row"><span>{t("UNCHANGED")}</span><b>{result.unchanged_percent.toFixed(1)}%</b></div><div className="bar"><i style={{width: `${result.unchanged_percent}%`}} /></div>
+        {result.texture_shift_note && <div className="method-warning"><b>{t("Canopy texture")}</b><span>{result.texture_uniformity_before != null && result.texture_uniformity_after != null && <>{Math.round(result.texture_uniformity_before)} → {Math.round(result.texture_uniformity_after)}/100 {t("uniformity")}. </>}{t(result.texture_shift_note)}</span></div>}
+        <div className="method-warning"><b>{t("Alignment method")}</b><span>ORB keypoints + RANSAC homography. {result.keypoints_matched} inlier matches at {result.inlier_ratio.toFixed(0)}% agreement -- higher agreement means the alignment (and therefore the diff) is more trustworthy.</span></div>
       </article>
     </section>}
   </div>;
@@ -1017,7 +1143,7 @@ type MosaicApiResult = {
 const MOSAIC_MIN_IMAGES = 2;
 const MOSAIC_MAX_IMAGES = 12;
 
-function Mosaic() {
+function Mosaic({ t }: { t: (k: string) => string }) {
   const [files, setFiles] = useState<{ file: File; preview: string }[]>([]);
   const [stitching, setStitching] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1058,10 +1184,10 @@ function Mosaic() {
 
   return <div className="page narrow">
     <article className="panel upload-panel">
-      <h3>Overlapping field photos</h3>
-      <p>Upload 2–{MOSAIC_MAX_IMAGES} photos of the same field with real visual overlap between neighbors -- they'll be stitched into one wider composite.</p>
+      <h3>{t("Overlapping field photos")}</h3>
+      <p>{t("Upload 2–12 photos of the same field with real visual overlap between neighbors -- they'll be stitched into one wider composite.")}</p>
       <div className="dropzone" onClick={() => inputRef.current?.click()} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); addFiles(e.dataTransfer.files); }} style={{height: 180}}>
-        <div className="upload-icon">↥</div><b>Drop photos here</b><span>or click to browse -- select multiple at once</span>
+        <div className="upload-icon">↥</div><b>{t("Drop photos here")}</b><span>{t("or click to browse -- select multiple at once")}</span>
         <input ref={inputRef} hidden type="file" accept="image/png,image/jpeg" multiple onChange={(e) => addFiles(e.target.files)} />
       </div>
       {files.length > 0 && <div className="file-pill" style={{flexWrap: "wrap", gap: 10, alignItems: "flex-start"}}>
@@ -1071,21 +1197,21 @@ function Mosaic() {
         </div>)}
       </div>}
     </article>
-    <div className="tech-note"><b>▦ How this works</b><span>OpenCV's multi-image stitcher (feature matching, bundle adjustment, seam blending) aligns and blends all the photos into one composite. This is a real algorithmic stitch, not a georeferenced orthomosaic -- there's no GPS/elevation data here to tie any pixel to a real-world coordinate, so it's useful for seeing more of a field at once, not for surveying it.</span></div>
-    {error && <div className="tech-note error-note"><b>⚠ Stitching failed</b><span>{error}</span></div>}
-    <button className="primary full" disabled={files.length < MOSAIC_MIN_IMAGES || stitching} onClick={runStitch}>{stitching ? <><span className="spinner" /> Stitching {files.length} photos…</> : <>Stitch {files.length || ""} photos <span>→</span></>}</button>
+    <div className="tech-note"><b>▦ {t("How this works")}</b><span>{t("OpenCV's multi-image stitcher (feature matching, bundle adjustment, seam blending) aligns and blends all the photos into one composite. This is a real algorithmic stitch, not a georeferenced orthomosaic -- there's no GPS/elevation data here to tie any pixel to a real-world coordinate, so it's useful for seeing more of a field at once, not for surveying it.")}</span></div>
+    {error && <div className="tech-note error-note"><b>⚠ {t("Stitching failed")}</b><span>{error}</span></div>}
+    <button className="primary full" disabled={files.length < MOSAIC_MIN_IMAGES || stitching} onClick={runStitch}>{stitching ? <><span className="spinner" /> {t("Stitching")} {files.length} {t("photos used")}…</> : <>{t("Stitch")} {files.length || ""} {t("photos used")} <span>→</span></>}</button>
 
-    {result && !result.success && <div className="tech-note error-note" style={{marginTop: 18}}><b>⚠ Couldn't stitch these photos</b><span>{result.warning ?? "The photos could not be aligned into a mosaic."}</span></div>}
+    {result && !result.success && <div className="tech-note error-note" style={{marginTop: 18}}><b>⚠ {t("Couldn't stitch these photos")}</b><span>{result.warning ? t(result.warning) : t("The photos could not be aligned into a mosaic.")}</span></div>}
 
     {result && result.success && result.mosaic && <article className="panel vision-panel" style={{marginTop: 18}}>
-      <div className="panel-head"><div><h3>Stitched mosaic</h3><p>{result.images_used} of {result.images_submitted} photos used</p></div></div>
-      <div className="result-image" style={{height: "auto"}}><img src={result.mosaic} alt="Stitched field mosaic" style={{width: "100%", height: "auto", display: "block"}} /></div>
-      <div className="method-warning" style={{margin: 16}}><b>Not a georeferenced orthomosaic</b><span>This composite has no absolute real-world coordinates -- it's aligned in the first photo's own relative pixel space using visual feature matching only. Don't use it for area measurement or precise field mapping.</span></div>
+      <div className="panel-head"><div><h3>{t("Stitched mosaic")}</h3><p>{result.images_used} of {result.images_submitted} {t("photos used")}</p></div></div>
+      <div className="result-image mosaic-result-image"><img src={result.mosaic} alt="Stitched field mosaic" /></div>
+      <div className="method-warning" style={{margin: 16}}><b>{t("Not a georeferenced orthomosaic")}</b><span>{t("This composite has no absolute real-world coordinates -- it's aligned in the first photo's own relative pixel space using visual feature matching only. Don't use it for area measurement or precise field mapping.")}</span></div>
     </article>}
   </div>;
 }
 
-function Settings({ settings, onSave }: { settings: Settings; onSave: (next: Settings) => void }) {
+function Settings({ settings, onSave, t }: { settings: Settings; onSave: (next: Settings) => void; t: (k: string) => string }) {
   const [draft, setDraft] = useState<Settings>(settings);
 
   useEffect(() => {
@@ -1095,5 +1221,5 @@ function Settings({ settings, onSave }: { settings: Settings; onSave: (next: Set
 
   const isDirty = JSON.stringify(draft) !== JSON.stringify(settings);
 
-  return <div className="page narrow"><section className="panel settings"><h3>Analysis defaults</h3><p>Configure how new field surveys are interpreted.</p><label>DEFAULT AREA UNIT<select value={draft.areaUnit} onChange={(e) => setDraft({...draft, areaUnit: e.target.value as Settings["areaUnit"]})}><option value="ha">Hectares (ha)</option><option value="acres">Acres</option></select></label><label>MODEL PROFILE<select value={draft.modelProfile} onChange={(e) => setDraft({...draft, modelProfile: e.target.value as Settings["modelProfile"]})}><option value="balanced">Balanced · Recommended</option><option value="sensitive">High sensitivity</option><option value="precise">High precision</option></select><small className="field-help">Sensitivity trades false negatives for false positives -- high sensitivity flags more candidate plants but with more mistakes; high precision is stricter and undercounts sparse fields.</small></label><div className="toggle-row"><span><b>Automatic image enhancement</b><small>Apply denoising and histogram normalization before detection.</small></span><button className={draft.enhancement ? "toggle on" : "toggle"} aria-label="Toggle enhancement" onClick={() => setDraft({...draft, enhancement: !draft.enhancement})}><i /></button></div><div className="toggle-row"><span><b>Segmentation refinement</b><small>Use SAM masks to refine crop coverage estimates.</small></span><button className={draft.segmentationRefinement ? "toggle on" : "toggle"} aria-label="Toggle segmentation" onClick={() => setDraft({...draft, segmentationRefinement: !draft.segmentationRefinement})}><i /></button></div><div className="toggle-row"><span><b>Perspective correction</b><small>Straighten non-nadir (tilted/handheld) photos using detected row lines before analysis.</small></span><button className={draft.perspectiveCorrection ? "toggle on" : "toggle"} aria-label="Toggle perspective correction" onClick={() => setDraft({...draft, perspectiveCorrection: !draft.perspectiveCorrection})}><i /></button></div><button className="primary compact" disabled={!isDirty} onClick={() => onSave(draft)}>{isDirty ? "Save preferences" : "Saved ✓"}</button></section></div>;
+  return <div className="page narrow"><section className="panel settings"><h3>{t("Analysis defaults")}</h3><p>{t("Configure how new field surveys are interpreted.")}</p><label>{t("DEFAULT AREA UNIT")}<select value={draft.areaUnit} onChange={(e) => setDraft({...draft, areaUnit: e.target.value as Settings["areaUnit"]})}><option value="ha">{t("Hectares (ha)")}</option><option value="acres">{t("Acres")}</option></select></label><label>{t("MODEL PROFILE")}<select value={draft.modelProfile} onChange={(e) => setDraft({...draft, modelProfile: e.target.value as Settings["modelProfile"]})}><option value="balanced">{t("Balanced · Recommended")}</option><option value="sensitive">{t("High sensitivity")}</option><option value="precise">{t("High precision")}</option></select><small className="field-help">{t("Sensitivity trades false negatives for false positives -- high sensitivity flags more candidate plants but with more mistakes; high precision is stricter and undercounts sparse fields.")}</small></label><div className="toggle-row"><span><b>{t("Automatic image enhancement")}</b><small>{t("Apply denoising and histogram normalization before detection.")}</small></span><button className={draft.enhancement ? "toggle on" : "toggle"} aria-label="Toggle enhancement" onClick={() => setDraft({...draft, enhancement: !draft.enhancement})}><i /></button></div><div className="toggle-row"><span><b>{t("Segmentation refinement")}</b><small>{t("Use SAM masks to refine crop coverage estimates.")}</small></span><button className={draft.segmentationRefinement ? "toggle on" : "toggle"} aria-label="Toggle segmentation" onClick={() => setDraft({...draft, segmentationRefinement: !draft.segmentationRefinement})}><i /></button></div><div className="toggle-row"><span><b>{t("Perspective correction")}</b><small>{t("Straighten non-nadir (tilted/handheld) photos using detected row lines before analysis.")}</small></span><button className={draft.perspectiveCorrection ? "toggle on" : "toggle"} aria-label="Toggle perspective correction" onClick={() => setDraft({...draft, perspectiveCorrection: !draft.perspectiveCorrection})}><i /></button></div><button className="primary compact" disabled={!isDirty} onClick={() => onSave(draft)}>{isDirty ? t("Save preferences") : t("Saved ✓")}</button></section></div>;
 }

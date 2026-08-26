@@ -13,4 +13,4 @@ transformers==5.15.0
 Pillow==12.3.0
 sahi==0.12.5
 reportlab==5.0.0
-scikit-image==0.26.0
+scikit-image==0.25.2

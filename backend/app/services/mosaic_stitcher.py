@@ -39,7 +39,7 @@ class MosaicStitcher:
     """
 
     def __init__(self) -> None:
-        self._mode = cv2.Stitcher_PANORAMA
+        self._mode = cv2.Stitcher_SCANS
 
     def stitch(self, images: list[np.ndarray]) -> MosaicResult:
         if len(images) < MIN_IMAGES:

@@ -28,7 +28,20 @@ SEGMENTATION_TINT_ALPHA = 0.5
 # "zero detections" is far more likely a genuinely bare-soil photo than a
 # domain-mismatch failure, so the (much slower) fallback only runs when
 # there's real vegetation the primary detector plausibly missed.
-FALLBACK_COVERAGE_THRESHOLD = 8.0
+FALLBACK_COVERAGE_THRESHOLD = 2.0
+
+# Approximate standing-plant densities used only when a field has clear
+# vegetation but neither object detector can resolve individual plants. The
+# coverage factor keeps this conservative and avoids reporting zero for a
+# dense field photo whose plants are below detector resolution.
+VEGETATION_DENSITY_PER_HA = {
+    "wheat": 180_000,
+    "rice": 220_000,
+    "corn": 65_000,
+    "soybean": 250_000,
+    "tomato": 20_000,
+    "_default": 100_000,
+}
 
 
 def _segmentation_overlay(image: np.ndarray, mask: np.ndarray) -> np.ndarray:
@@ -74,15 +87,20 @@ class CropAnalysisPipeline:
             image = tilt.image
         vegetation = self.cv.vegetation_metrics(image)
         detections = self.detector.detect(image, conf_threshold=conf_threshold)
+        estimated_plant_count: int | None = None
         detection_method = "fine_tuned"
         detection_note = f"{len(detections)} plant(s) detected by the fine-tuned model."
-        if not detections and vegetation.coverage_percent >= FALLBACK_COVERAGE_THRESHOLD:
+        # A single box on a visibly dense crop is usually an under-count, not
+        # a one-plant field. Let the general detector supplement the fine-tuned
+        # model in that case, then keep whichever result finds more plants.
+        if len(detections) < 3 and vegetation.coverage_percent >= FALLBACK_COVERAGE_THRESHOLD:
+            primary_count = len(detections)
             fallback_detections = self.fallback_detector.detect(image)
-            if fallback_detections:
+            if len(fallback_detections) > len(detections):
                 detections = fallback_detections
                 detection_method = "general_fallback"
                 detection_note = (
-                    f"The fine-tuned model found nothing despite {vegetation.coverage_percent:.0f}% visible "
+                    f"The fine-tuned model found only {primary_count} plant(s) despite {vegetation.coverage_percent:.0f}% visible "
                     "vegetation coverage (this photo may look unlike its training images) -- fell back to a "
                     f"general-purpose zero-shot detector, which found {len(detections)} plant(s). Less precise "
                     "than the fine-tuned model on photos it was actually trained for."
@@ -92,6 +110,22 @@ class CropAnalysisPipeline:
                     f"No plants detected by either the fine-tuned model or the general-purpose fallback, "
                     f"despite {vegetation.coverage_percent:.0f}% visible vegetation coverage."
                 )
+        if len(detections) < 3 and vegetation.coverage_percent >= FALLBACK_COVERAGE_THRESHOLD:
+            # Individual plants can be sub-pixel/small in a wide field view.
+            # Keep the detector result empty for overlays, but provide a
+            # conservative population estimate for density and yield rather
+            # than returning the unusable 0-plant/0-yield pair.
+            density_per_ha = VEGETATION_DENSITY_PER_HA.get(crop.lower(), VEGETATION_DENSITY_PER_HA["_default"])
+            estimated_count = max(1, round(area_ha * density_per_ha * (vegetation.coverage_percent / 100) * 0.25))
+            # Keep plant_count strictly as the number of boxes actually
+            # detected. The area/density calculation is a separate planning
+            # estimate and must never masquerade as an exact image count.
+            estimated_plant_count = estimated_count
+            detection_note = detection_note + (
+                f" Individual plants were too small to box reliably; population estimated from "
+                f"{vegetation.coverage_percent:.0f}% visible vegetation coverage at approximately "
+                f"{estimated_plant_count:,} plants. {len(detections):,} plant(s) were directly detected."
+            )
         plant_count = len(detections)
         # YOLO's boxes are used as SAM prompts, so detection must run first.
         # segment_instances is called once here (not SAMSegmenter.refine,
@@ -104,31 +138,46 @@ class CropAnalysisPipeline:
             if instance_masks is not None
             else vegetation.green_mask
         )
-        confidence = 100 * sum(d.confidence for d in detections) / max(plant_count, 1)
+        mask_confidence = getattr(vegetation, "mask_confidence_score", 0.0)
+        if estimated_plant_count is not None:
+            # There are no reliable individual boxes, so report confidence
+            # in the RGB crop mask with a conservative penalty for estimating
+            # population rather than pretending greenness is detector
+            # confidence.
+            confidence = 0.75 * mask_confidence
+        else:
+            detector_confidence = 100 * sum(d.confidence for d in detections) / max(plant_count, 1)
+            # Detection confidence and RGB-mask confidence describe different
+            # evidence sources. Keep both in the combined reliability score;
+            # vegetation_score is deliberately not used here.
+            confidence = 0.75 * detector_confidence + 0.25 * mask_confidence
         crop_coverage = round(100 * (refined_mask > 0).mean(), 2)
         texture = self.texture.analyze(image, refined_mask)
-        # Texture gets a real (not token) weight: two fields at the same
-        # color health can still mean very different things -- a uniformly
-        # discolored field (drought, nutrient deficiency) keeps a smooth
-        # texture, while disease or pest damage tends to look patchy at
-        # the same color health. health_score alone can't separate those;
-        # texture_pattern (surfaced separately on AnalysisResult) is what
-        # actually distinguishes them for the caller.
-        health = round(min(100, 0.40 * vegetation.vegetation_score + 0.35 * crop_coverage + 0.25 * texture.uniformity_score), 2)
+        # Health is based on the crop's greenness and visible crop coverage.
+        # Texture is deliberately not part of the health score: row gaps,
+        # planting geometry, shadows, and field perspective can all look
+        # "patchy" without meaning that the crop is unhealthy. Texture is
+        # surfaced separately as a diagnostic pattern and only informs the
+        # recommendation when the color/coverage health is already reduced.
+        health = round(min(100, 0.65 * vegetation.vegetation_score + 0.35 * crop_coverage), 2)
         per_plant_kg = self.yield_estimator.resolve_per_plant_kg(crop, average_kg)
         h, w = image.shape[:2]
         # Same uniform-ground-scale assumption crop_density already makes
         # (area_ha spread evenly across the frame) -- not a new one
         # introduced for this.
+        population_count = estimated_plant_count if estimated_plant_count is not None else plant_count
         cm2_per_pixel = (area_ha * 1e8) / (w * h)
         plant_size = self.plant_size.analyze(instance_masks, cm2_per_pixel) if instance_masks else None
-        yield_size_factor, yield_size_note = self.yield_estimator.size_adjustment(plant_size, plant_count, area_ha)
+        yield_size_factor, yield_size_note = self.yield_estimator.size_adjustment(plant_size, population_count, area_ha)
         estimated = self.yield_estimator.estimate(
-            plant_count, crop, crop_coverage, health, average_kg, plant_size, area_ha
+            population_count, crop, crop_coverage, health, average_kg, plant_size, area_ha
         )
         return AnalysisResult(
             plant_count=plant_count,
-            crop_density=round(plant_count / area_ha, 2),
+            estimated_plant_count=estimated_plant_count,
+            # Density/yield use the estimated population when direct boxes
+            # are insufficient, while plant_count remains the direct count.
+            crop_density=round(population_count / area_ha, 2),
             crop_coverage=crop_coverage,
             vegetation_score=vegetation.vegetation_score,
             health_score=health,

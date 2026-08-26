@@ -102,7 +102,7 @@ def generate_report_pdf(
 
     metrics_table = Table(
         [
-            ["Plant count", "Crop density", "Crop coverage", "Health score", "Est. harvest"],
+            ["Detected plants", "Crop density", "Crop coverage", "Health score", "Est. harvest"],
             [
                 f"{result.plant_count:,}",
                 f"{result.crop_density:,.2f} / ha",
@@ -144,12 +144,18 @@ def generate_report_pdf(
         Paragraph(f"<b>{health_label}</b>", styles["body"]),
         Paragraph(health_copy, styles["body"]),
         Spacer(1, 0.08 * inch),
-        Paragraph(f"Green vegetation ratio: {result.vegetation_score:.1f}%", styles["body"]),
+        Paragraph(f"Vegetation greenness: {result.vegetation_score:.1f}%", styles["body"]),
         Paragraph(
             f"Texture pattern: {result.texture_pattern} ({result.texture_uniformity_score:.0f}/100 uniformity)",
             styles["body"],
         ),
     ]
+    if result.estimated_plant_count is not None:
+        story.append(Paragraph(
+            f"Estimated field population: approximately {result.estimated_plant_count:,} plants "
+            f"({result.plant_count:,} directly detected). This is an area-based estimate, not an exact count.",
+            styles["body"],
+        ))
     if result.tilt_corrected:
         story.append(Paragraph(f"Perspective correction: {result.tilt_correction_note}", styles["body"]))
     if result.plant_size_stats is not None:

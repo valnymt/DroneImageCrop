@@ -28,3 +28,19 @@ export const analyses = sqliteTable("analyses", {
   plantSizeUniformityScore: real("plant_size_uniformity_score"),
   plantSizeMeanAspectRatio: real("plant_size_mean_aspect_ratio"),
 });
+
+export const users = sqliteTable("users", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  email: text("email").notNull().unique(),
+  username: text("username").notNull().default("Farmer"),
+  occupation: text("occupation").notNull().default("Agricultural Researcher"),
+  passwordHash: text("password_hash").notNull(),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
+export const sessions = sqliteTable("sessions", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  token: text("token").notNull().unique(),
+  userId: integer("user_id").notNull().references(() => users.id),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});

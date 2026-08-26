@@ -27,6 +27,9 @@ class PlantSizeStats(BaseModel):
 
 class AnalysisResult(BaseModel):
     plant_count: int = Field(ge=0)
+    # Direct detector output only. This is never replaced by an area-based
+    # population guess, so callers can safely call it a detected count.
+    estimated_plant_count: int | None = Field(default=None, ge=0)
     # "fine_tuned" (normal case) or "general_fallback" -- the fine-tuned
     # YOLO checkpoint found literally nothing despite real vegetation
     # coverage (see open_vocab_detector.py's docstring for why: it
