@@ -327,6 +327,7 @@ export default function Home() {
   const [areaSource, setAreaSource] = useState<string | null>(null);
   const [areaLowHectares, setAreaLowHectares] = useState<number | null>(null);
   const [areaHighHectares, setAreaHighHectares] = useState<number | null>(null);
+  const [inspectionError, setInspectionError] = useState<string | null>(null);
   const [manualAltitude, setManualAltitude] = useState("");
   // CLIP's own confidence in its crop-type guess (0-100) -- surfaced in
   // Results (Phase M) so a low-confidence guess is visibly flagged rather
@@ -378,6 +379,7 @@ export default function Home() {
     setAreaSource(null);
     setAreaLowHectares(null);
     setAreaHighHectares(null);
+    setInspectionError(null);
     setManualAltitude("");
     setCropConfidence(null);
     inspectPromiseRef.current = null;
@@ -435,6 +437,7 @@ export default function Home() {
     setAreaHighHectares(null);
     setManualAltitude("");
     setCropConfidence(null);
+    setInspectionError(null);
     inspectPromiseRef.current = inspectImage(f);
   }
 
@@ -448,7 +451,11 @@ export default function Home() {
       formData.append("image", f);
       if (manualAltitudeM) formData.append("manual_altitude_m", String(manualAltitudeM));
       const res = await fetch(`${API_BASE}/api/inspect`, { method: "POST", body: formData, signal: controller.signal });
-      if (requestId !== inspectRequestId.current || !res.ok) return;
+       if (requestId !== inspectRequestId.current) return;
+       if (!res.ok) {
+         setInspectionError(`AI inspection unavailable (${res.status}); default values are shown.`);
+         return;
+       }
       const result: InspectResult = await res.json();
       if (requestId !== inspectRequestId.current) return;
       if (SUPPORTED_CROPS.includes(result.crop_type)) applyCrop(result.crop_type, true);
@@ -458,10 +465,9 @@ export default function Home() {
       setAreaHighHectares(result.area_high_hectares);
       setCropConfidence(result.confidence);
     } catch {
-      // Best-effort only: network error, timeout/abort, or the backend
-      // being down. Falls back to the last-known crop/area defaults so
-      // /analyze still has values to submit -- there is no manual entry
-      // to fall back to anymore.
+      if (requestId === inspectRequestId.current) {
+        setInspectionError("AI inspection unavailable; default values are shown.");
+      }
     } finally {
       clearTimeout(timeout);
       if (requestId === inspectRequestId.current) setInspecting(false);
@@ -578,7 +584,7 @@ export default function Home() {
         <header><div><span className="eyebrow">{t("DRONE CROP INTELLIGENCE")}</span><h1>{view === "dashboard" ? t("Field overview") : view === "analyze" ? t("Analyze a field") : view === "results" ? t("Analysis complete") : view === "history" ? t("Field history") : view === "compare" ? t("Compare flights") : view === "mosaic" ? t("Field mosaic") : t("System settings")}</h1></div><div className="header-actions"><button className="primary compact" onClick={startNewSession}>＋ {t("New analysis")}</button></div></header>
 
         {view === "dashboard" && <Dashboard records={records} totals={totals} onAnalyze={startNewSession} onHistory={() => setView("history")} t={t} />}
-        {view === "analyze" && <Upload file={file} preview={preview} fieldName={fieldName} crop={crop} area={area} averageYield={averageYield} analyzing={analyzing} error={analyzeError} inspecting={inspecting} cropSuggested={cropSuggested} areaSuggested={areaSuggested} areaSource={areaSource} manualAltitude={manualAltitude} setManualAltitude={setManualAltitude} onEstimateAltitude={estimateWithManualAltitude} areaUnit={settings.areaUnit} inputRef={inputRef} onFile={chooseFile} setFieldName={setFieldName} setCrop={setCrop} setArea={setArea} setAverageYield={setAverageYield} run={runAnalysis} t={t} />}
+        {view === "analyze" && <Upload file={file} preview={preview} fieldName={fieldName} crop={crop} area={area} averageYield={averageYield} analyzing={analyzing} error={analyzeError} inspectionError={inspectionError} inspecting={inspecting} cropSuggested={cropSuggested} areaSuggested={areaSuggested} areaSource={areaSource} manualAltitude={manualAltitude} setManualAltitude={setManualAltitude} onEstimateAltitude={estimateWithManualAltitude} areaUnit={settings.areaUnit} inputRef={inputRef} onFile={chooseFile} setFieldName={setFieldName} setCrop={setCrop} setArea={setArea} setAverageYield={setAverageYield} run={runAnalysis} t={t} />}
         {view === "results" && latest && <Results data={latest} file={file} areaUnit={settings.areaUnit} onNew={startNewSession} onAdjust={(patch) => setLatest((prev) => prev ? { ...prev, ...patch } : prev)} t={t} />}
         {view === "history" && <History records={records} loading={historyLoading} error={historyError} onRetry={fetchHistory} areaUnit={settings.areaUnit} t={t} />}
         {view === "compare" && <Compare t={t} />}
@@ -756,10 +762,15 @@ function Upload(p: any) {
   const areaFactor = p.areaUnit === "acres" ? ACRES_PER_HA : 1;
   const displayArea = p.area === "" ? "" : String(Math.round(Number(p.area) * areaFactor * 100) / 100);
   const setDisplayArea = (value: string) => p.setArea(value === "" ? "" : String(Number(value) / areaFactor));
+  const suggestionSummary = p.inspectionError
+    ? <><span>{p.inspectionError}</span><small>Crop and area values can be entered or corrected below.</small></>
+    : p.cropSuggested || p.areaSuggested
+      ? <><span>{t("AI suggested:")} {p.cropSuggested && <b>{t(p.crop)}</b>}{p.cropSuggested && p.areaSuggested && " · "}{p.areaSuggested && <b>{displayArea} {p.areaUnit === "acres" ? "ac" : "ha"}</b>}</span><small>{t("Values remain editable before analysis.")}</small></>
+      : <><span>{t("Using default values:")} <b>{t(p.crop)}</b> · <b>{displayArea} {p.areaUnit === "acres" ? "ac" : "ha"}</b></span><small>{t("AI inspection did not return a suggestion.")}</small></>;
 
   return <div className="page narrow"><div className="steps steps-2"><span className="done">1</span><i /><span className="done">2</span><small>{t("Upload imagery")}</small><small>{t("AI-assisted analysis")}</small></div>
-    <section className="upload-grid"><article className="panel upload-panel"><h3>{t("Drone imagery")}</h3><p>{t("Upload a high-resolution aerial image of your field.")}</p><div className={`dropzone ${p.preview ? "has-image" : ""}`} onClick={() => p.inputRef.current?.click()} onDragOver={(event: React.DragEvent) => event.preventDefault()} onDrop={(event: React.DragEvent) => { event.preventDefault(); p.onFile(event.dataTransfer.files[0]); }}>{p.preview ? <img src={p.preview} alt="Selected aerial field" /> : <><div className="upload-icon">^</div><b>{t("Drop your drone image here")}</b><span>{t("or click to browse your files")}</span><small>{t("JPG or PNG · Maximum 20 MB")}</small></>}{p.inspecting && <span className="inspect-status"><span className="spinner" /> {t("AI is reading crop type and field area…")}</span>}<input ref={p.inputRef} hidden type="file" accept="image/png,image/jpeg" onChange={(event) => p.onFile(event.target.files?.[0])} /></div>{p.file && <div className="file-pill"><span>✓</span><div><b>{p.file.name}</b><small>{(p.file.size / 1048576).toFixed(2)} MB · {t("Ready for analysis")}</small></div><button type="button" onClick={(event) => { event.stopPropagation(); p.inputRef.current?.click(); }}>{t("Replace")}</button></div>}</article>
-    <article className="panel form-panel"><h3>{t("Field parameters")}</h3><p>{t("These details calibrate density and yield estimates.")}</p><label>{t("FIELD NAME (OPTIONAL)")}<input value={p.fieldName} onChange={(event) => p.setFieldName(event.target.value)} placeholder={t("e.g. West Field")} /></label><label>{t("CROP TYPE")}<select value={p.crop} onChange={(event) => p.setCrop(event.target.value)}>{SUPPORTED_CROPS.map((crop) => <option key={crop} value={crop}>{t(crop)}</option>)}</select>{p.cropSuggested && <small className="suggested-tag">AI suggestion — editable</small>}</label><label>{t("FIELD AREA (HA)")}<input type="number" min=".01" step=".01" value={displayArea} onChange={(event) => setDisplayArea(event.target.value)} />{p.areaSuggested && <small className="suggested-tag">AI suggestion — editable</small>}</label><div className="quick-values"><span>{t("Quick area")}</span>{[0.5, 1, 2, 5].map((value) => <button type="button" key={value} className={Number(displayArea) === value ? "chosen" : ""} onClick={() => setDisplayArea(String(value))}>{value} {p.areaUnit === "acres" ? "ac" : "ha"}</button>)}</div><label>{t("Average yield per plant (kg)")}<input type="number" min="0" step=".001" value={p.averageYield} onChange={(event) => p.setAverageYield(event.target.value)} placeholder="Auto" /><small className="field-help">{t("Optional farm-specific override")}</small></label>{p.file && <div className="ai-predict-summary">{p.inspecting ? <span><span className="spinner" /> {t("Detecting crop type and field area…")}</span> : <><span>{t("AI suggested:")} <b>{t(p.crop)}</b> · <b>{displayArea} {p.areaUnit === "acres" ? "ac" : "ha"}</b></span><small>{t("Values remain editable before analysis.")}</small></>}</div>}{p.file && !p.inspecting && p.areaSource === "unavailable" && <div className="parameter-note"><b>{t("Couldn't measure ground area from this photo")}</b><span>{t("No altitude data and no visible row pattern to measure against. If you know the drone's flight altitude, enter it below for a more accurate area — otherwise a default area estimate is used.")}</span><div className="altitude-inline"><input type="number" min="1" step="1" placeholder={t("Flight altitude (m)")} value={p.manualAltitude} onChange={(event) => p.setManualAltitude(event.target.value)} /><button type="button" className="ghost" onClick={p.onEstimateAltitude} disabled={!p.manualAltitude || Number(p.manualAltitude) <= 0}>Estimate</button></div></div>}<div className="tech-note"><b>RGB</b><span>{t("The uploaded image is measured for green vegetation coverage using three independent RGB indices (Excess Green, VARI, ExGR) that must agree before a pixel counts as vegetation. Non-green areas are treated as bare soil or stressed ground, not classified by color. Results are visual indicators—not a laboratory diagnosis.")}</span></div>{p.error && <div className="tech-note error-note"><b>⚠ {t("Analysis failed")}</b><span>{p.error}</span></div>}<button className="primary full" disabled={!p.file || p.analyzing || p.inspecting || !p.crop || Number(p.area) <= 0} onClick={p.run}>{p.analyzing ? <><span className="spinner" /> {t("Running computer-vision pipeline…")}</> : <>{t("Run image analysis")} <span>→</span></>}</button></article></section>
+    <section className="upload-grid"><article className="panel upload-panel"><h3>{t("Drone imagery")}</h3><p>{t("Upload a high-resolution aerial image of your field.")}</p><div className={`dropzone ${p.preview ? "has-image" : ""}`} onClick={() => p.inputRef.current?.click()} onDragOver={(event: React.DragEvent) => event.preventDefault()} onDrop={(event: React.DragEvent) => { event.preventDefault(); p.onFile(event.dataTransfer.files[0]); }}>{p.preview ? <img src={p.preview} alt="Selected aerial field" /> : <><div className="upload-icon">↑</div><b>{t("Drop your drone image here")}</b><span>{t("or click to browse your files")}</span><small>{t("JPG or PNG · Maximum 20 MB")}</small></>}{p.inspecting && <span className="inspect-status"><span className="spinner" /> {t("AI is reading crop type and field area…")}</span>}<input ref={p.inputRef} hidden type="file" accept="image/png,image/jpeg" onChange={(event) => p.onFile(event.target.files?.[0])} /></div>{p.file && <div className="file-pill"><span>✓</span><div><b>{p.file.name}</b><small>{(p.file.size / 1048576).toFixed(2)} MB · {t("Ready for analysis")}</small></div><button type="button" onClick={(event) => { event.stopPropagation(); p.inputRef.current?.click(); }}>{t("Replace")}</button></div>}</article>
+    <article className="panel form-panel"><h3>{t("Field parameters")}</h3><p>{t("These details calibrate density and yield estimates.")}</p><label>{t("FIELD NAME (OPTIONAL)")}<input value={p.fieldName} onChange={(event) => p.setFieldName(event.target.value)} placeholder={t("e.g. West Field")} /></label><label>{t("CROP TYPE")}<select value={p.crop} onChange={(event) => p.setCrop(event.target.value)}>{SUPPORTED_CROPS.map((crop) => <option key={crop} value={crop}>{t(crop)}</option>)}</select>{p.cropSuggested && <small className="suggested-tag">AI suggestion — editable</small>}</label><label>{t("FIELD AREA (HA)")}<input type="number" min=".01" step=".01" value={displayArea} onChange={(event) => setDisplayArea(event.target.value)} />{p.areaSuggested && <small className="suggested-tag">AI suggestion — editable</small>}</label><div className="quick-values"><span>{t("Quick area")}</span>{[0.5, 1, 2, 5].map((value) => <button type="button" key={value} className={Number(displayArea) === value ? "chosen" : ""} onClick={() => setDisplayArea(String(value))}>{value} {p.areaUnit === "acres" ? "ac" : "ha"}</button>)}</div><label>{t("Average yield per plant (kg)")}<input type="number" min="0" step=".001" value={p.averageYield} onChange={(event) => p.setAverageYield(event.target.value)} placeholder="Auto" /><small className="field-help">{t("Optional farm-specific override")}</small></label>{p.file && <div className="ai-predict-summary">{p.inspecting ? <span><span className="spinner" /> {t("Detecting crop type and field area…")}</span> : suggestionSummary}</div>}{p.file && !p.inspecting && p.areaSource === "unavailable" && <div className="parameter-note"><b>{t("Couldn't measure ground area from this photo")}</b><span>{t("No altitude data and no visible row pattern to measure against. If you know the drone's flight altitude, enter it below for a more accurate area — otherwise a default area estimate is used.")}</span><div className="altitude-inline"><input type="number" min="1" step="1" placeholder={t("Flight altitude (m)")} value={p.manualAltitude} onChange={(event) => p.setManualAltitude(event.target.value)} /><button type="button" className="ghost" onClick={p.onEstimateAltitude} disabled={!p.manualAltitude || Number(p.manualAltitude) <= 0}>Estimate</button></div></div>}<div className="tech-note"><b>RGB</b><span>{t("The uploaded image is measured for green vegetation coverage using three independent RGB indices (Excess Green, VARI, ExGR) that must agree before a pixel counts as vegetation. Non-green areas are treated as bare soil or stressed ground, not classified by color. Results are visual indicators—not a laboratory diagnosis.")}</span></div>{p.error && <div className="tech-note error-note"><b>⚠ {t("Analysis failed")}</b><span>{p.error}</span></div>}<button className="primary full" disabled={!p.file || p.analyzing || p.inspecting || !p.crop || Number(p.area) <= 0} onClick={p.run}>{p.analyzing ? <><span className="spinner" /> {t("Running computer-vision pipeline…")}</> : <>{t("Run image analysis")} <span>→</span></>}</button></article></section>
   </div>;
 }
 

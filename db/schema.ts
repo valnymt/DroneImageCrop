@@ -3,6 +3,7 @@ import { integer, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 export const analyses = sqliteTable("analyses", {
   id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id").references(() => users.id),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   cropType: text("crop_type").notNull(),
   fieldSizeHectares: real("field_size_hectares").notNull(),
