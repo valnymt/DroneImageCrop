@@ -59,3 +59,5 @@ models/**/*.pt
 models/**/*.pth
 backend/*.pt
 backend/*.pth
+
+backend/.venv311/
